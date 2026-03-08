@@ -96,11 +96,12 @@ class FaceRenderer:
         # Camera + light
         cam  = face_cfg["camera"]
         self.view_pos = glm.vec3(*cam["position"])
-        self.view     = glm.lookAt(
+        self.view = glm.lookAt(
             self.view_pos,
             glm.vec3(0, 0, 0),
             glm.vec3(0, 1, 0)
         )
+        self._view_t = glm.transpose(self.view)   # pre-transposed for upload
 
         light = face_cfg["light"]
         self.light_pos   = glm.vec3(*light["position"])
@@ -181,16 +182,18 @@ class FaceRenderer:
 
         normal_mat = glm.mat3(glm.transpose(glm.inverse(model)))
 
-        # Set uniforms
-        self.prog["u_model"].write(glm.value_ptr(model))
-        self.prog["u_view"].write(glm.value_ptr(self.view))
-        self.prog["u_proj"].write(glm.value_ptr(proj))
-        self.prog["u_normal_mat"].write(glm.value_ptr(normal_mat))
+        # Set uniforms — PyGLM bytes() is row-major; OpenGL needs column-major.
+        # Transpose mat4/mat3 before bytes() to fix the memory layout.
+        self.prog["u_model"].write(bytes(glm.transpose(model)))
+        self.prog["u_view"].write(bytes(self._view_t))
+        self.prog["u_proj"].write(bytes(glm.transpose(proj)))
+        self.prog["u_normal_mat"].write(bytes(glm.transpose(normal_mat)))
 
-        self.prog["u_light_pos"].write(glm.value_ptr(self.light_pos))
-        self.prog["u_light_color"].write(glm.value_ptr(self.light_color))
-        self.prog["u_view_pos"].write(glm.value_ptr(self.view_pos))
-        self.prog["u_skin_color"].write(glm.value_ptr(self.skin_color))
+        # vec3 uniforms are fine — no row/column ambiguity
+        self.prog["u_light_pos"].write(bytes(self.light_pos))
+        self.prog["u_light_color"].write(bytes(self.light_color))
+        self.prog["u_view_pos"].write(bytes(self.view_pos))
+        self.prog["u_skin_color"].write(bytes(self.skin_color))
 
         self.prog["u_ambient"]   = self.ambient
         self.prog["u_diffuse"]   = self.diffuse

@@ -87,7 +87,8 @@ class RaeonWindow:
 
         ctx = moderngl.create_context()
         ctx.enable(moderngl.DEPTH_TEST)
-        ctx.enable(moderngl.CULL_FACE)
+        # CULL_FACE enabled after confirming winding order
+        # ctx.enable(moderngl.CULL_FACE)
 
         # Build mesh + expression + renderer
         mesh     = FaceMesh()
@@ -98,6 +99,8 @@ class RaeonWindow:
 
         self._running = True
         last_t = time.time()
+
+        glfw.set_window_pos(win, 900, 50)   # position away from other windows
 
         print(f"[RAEON] Window open — {self.width}x{self.height}")
         print(f"[RAEON] Presets: 1=curiosity 2=joy 3=focus 4=surprise "
@@ -131,7 +134,6 @@ class RaeonWindow:
             ctx.viewport = (0, 0, fb_w, fb_h)
 
             renderer.render(fb_w, fb_h)
-
             glfw.swap_buffers(win)
             glfw.poll_events()
 

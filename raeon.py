@@ -96,12 +96,12 @@ def main():
     args = parser.parse_args()
 
     print("""
-  ╔══════════════════════════════════════════════════╗
-  ║                                                  ║
-  ║   RAEON  v0.1.0  —  The Face of Draeghir         ║
-  ║   Nothing fixed. Everything evolving.            ║
-  ║                                                  ║
-  ╚══════════════════════════════════════════════════╝
+  +==================================================+
+  |                                                  |
+  |   RAEON  v0.1.0  --  The Face of Draeghir        |
+  |   Nothing fixed. Everything evolving.            |
+  |                                                  |
+  +==================================================+
     """)
 
     # Create window

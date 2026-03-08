@@ -112,7 +112,7 @@ class FaceMesh:
         du = np.array([xu - x0, yu - y0, zu - z0])
         dv = np.array([xv - x0, yv - y0, zv - z0])
 
-        n = np.cross(du, dv)
+        n = np.cross(dv, du)   # dv×du gives outward-facing normals
         ln = np.linalg.norm(n)
         if ln < 1e-8:
             return 0.0, 0.0, 1.0
