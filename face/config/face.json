@@ -27,7 +27,7 @@
 
   "skin": {
     "base_color":    [0.95, 0.82, 0.74],
-    "ambient":        0.22,
+    "ambient":        0.30,
     "diffuse":        0.75,
     "specular":       0.25,
     "shininess":      18.0
@@ -41,7 +41,7 @@
   },
 
   "light": {
-    "position": [0.8, 1.4, 2.2],
+    "position": [0.4, 1.0, 2.5],
     "color":    [1.0, 0.97, 0.92]
   }
 }

@@ -2,9 +2,15 @@
 renderer.py — RAEON Face Renderer
 
 Pure ModernGL + PyGLM. No game engine. No Three.js. Ours entirely.
-Phong shading with skin-tuned lighting.
-Expression displacements uploaded to GPU every frame.
-Head rotation via model matrix (tilt + gaze).
+
+Key design: procedural face colour computed in the FRAGMENT SHADER via
+interpolated UV coordinates.  This gives pixel-level precision for eyes,
+brows, and lips regardless of mesh vertex resolution.
+
+Colour layers (evaluated per-pixel from UV):
+  u_skin_color → lips → sclera → iris → pupil → highlight → eyebrows
+
+Lighting: Phong + subsurface scatter + rim light.
 """
 
 import numpy as np
@@ -18,6 +24,7 @@ VERT_SHADER = """
 in vec3 in_position;
 in vec3 in_normal;
 in vec3 in_displacement;
+in vec2 in_uv;
 
 uniform mat4 u_model;
 uniform mat4 u_view;
@@ -26,6 +33,7 @@ uniform mat3 u_normal_mat;
 
 out vec3 v_normal;
 out vec3 v_frag_pos;
+out vec2 v_uv;
 
 void main() {
     vec3 pos    = in_position + in_displacement;
@@ -34,6 +42,7 @@ void main() {
     gl_Position = u_proj * u_view * world;
     v_frag_pos  = vec3(world);
     v_normal    = normalize(u_normal_mat * (in_normal + in_displacement * 0.3));
+    v_uv        = in_uv;
 }
 """
 
@@ -42,11 +51,12 @@ FRAG_SHADER = """
 
 in vec3 v_normal;
 in vec3 v_frag_pos;
+in vec2 v_uv;
 
-uniform vec3 u_light_pos;
-uniform vec3 u_light_color;
-uniform vec3 u_view_pos;
-uniform vec3 u_skin_color;
+uniform vec3  u_light_pos;
+uniform vec3  u_light_color;
+uniform vec3  u_view_pos;
+uniform vec3  u_skin_color;
 uniform float u_ambient;
 uniform float u_diffuse;
 uniform float u_specular;
@@ -54,33 +64,113 @@ uniform float u_shininess;
 
 out vec4 out_color;
 
+// ── Gaussian helper ─────────────────────────────────────────────────
+// su, sv are standard deviations in UV space (u-space scaled for circles)
+float G(vec2 uv, vec2 c, float su, float sv) {
+    vec2 d = (uv - c) / vec2(su, sv);
+    return exp(-0.5 * dot(d, d));
+}
+
+// ── Procedural face colour from UV ──────────────────────────────────
+// All Gaussian sizes use su ≈ sv * 1.55 to produce circles on-screen.
+// (At eye level: dx/du ≈ 0.57, dy/dv ≈ 0.88 → ratio = 0.88/0.57 = 1.54)
+//
+// Layer order: skin → lips → sclera → iris → pupil → highlight → brow
+vec3 face_material(vec2 uv) {
+    vec3  c = u_skin_color;
+    float a;
+
+    // ── Lips ────────────────────────────────────────────────────────
+    a = clamp(G(uv, vec2(0.500, 0.695), 0.130, 0.040) * 0.90
+            + G(uv, vec2(0.500, 0.735), 0.118, 0.036) * 1.00,
+            0.0, 1.0);
+    c = mix(c, vec3(0.82, 0.47, 0.45), a);
+
+    // ── Left eye ────────────────────────────────────────────────────
+    // Sclera (off-white almond) — wider so it's clearly visible
+    a = clamp(G(uv, vec2(0.335, 0.385), 0.062, 0.040) * 2.4, 0.0, 1.0);
+    c = mix(c, vec3(0.93, 0.91, 0.89), a);
+    // Iris (warm dark hazel)
+    a = clamp(G(uv, vec2(0.335, 0.386), 0.029, 0.019) * 2.6, 0.0, 1.0);
+    c = mix(c, vec3(0.23, 0.14, 0.09), a);
+    // Pupil (near-black)
+    a = clamp(G(uv, vec2(0.335, 0.387), 0.016, 0.010) * 3.8, 0.0, 1.0);
+    c = mix(c, vec3(0.04, 0.03, 0.02), a);
+    // Specular highlight (bright crescent top-left)
+    a = clamp(G(uv, vec2(0.326, 0.376), 0.009, 0.006) * 5.5, 0.0, 1.0);
+    c = mix(c, vec3(0.96, 0.96, 1.00), a);
+
+    // ── Right eye ───────────────────────────────────────────────────
+    // Sclera
+    a = clamp(G(uv, vec2(0.665, 0.385), 0.062, 0.040) * 2.4, 0.0, 1.0);
+    c = mix(c, vec3(0.93, 0.91, 0.89), a);
+    // Iris
+    a = clamp(G(uv, vec2(0.665, 0.386), 0.029, 0.019) * 2.6, 0.0, 1.0);
+    c = mix(c, vec3(0.23, 0.14, 0.09), a);
+    // Pupil
+    a = clamp(G(uv, vec2(0.665, 0.387), 0.016, 0.010) * 3.8, 0.0, 1.0);
+    c = mix(c, vec3(0.04, 0.03, 0.02), a);
+    // Highlight
+    a = clamp(G(uv, vec2(0.674, 0.376), 0.009, 0.006) * 5.5, 0.0, 1.0);
+    c = mix(c, vec3(0.96, 0.96, 1.00), a);
+
+    // ── Left eyebrow (arch: body + inner head + outer tail) ─────────
+    a = clamp(G(uv, vec2(0.326, 0.262), 0.060, 0.016) * 2.8   // main arch
+            + G(uv, vec2(0.290, 0.268), 0.022, 0.014) * 2.0   // inner head
+            + G(uv, vec2(0.360, 0.258), 0.022, 0.013) * 1.8,  // outer tail
+            0.0, 1.0);
+    c = mix(c, vec3(0.10, 0.07, 0.04), a);
+
+    // ── Right eyebrow (mirrored) ────────────────────────────────────
+    a = clamp(G(uv, vec2(0.674, 0.262), 0.060, 0.016) * 2.8
+            + G(uv, vec2(0.710, 0.268), 0.022, 0.014) * 2.0
+            + G(uv, vec2(0.640, 0.258), 0.022, 0.013) * 1.8,
+            0.0, 1.0);
+    c = mix(c, vec3(0.10, 0.07, 0.04), a);
+
+    return c;
+}
+
 void main() {
     vec3 norm      = normalize(v_normal);
     vec3 light_dir = normalize(u_light_pos - v_frag_pos);
     vec3 view_dir  = normalize(u_view_pos  - v_frag_pos);
     vec3 half_dir  = normalize(light_dir + view_dir);
 
+    // Material colour from procedural UV map
+    vec3 mat = face_material(v_uv);
+
+    // How "skin-like" is this pixel? (1=skin, 0=eye/brow/lip)
+    float is_skin = clamp(dot(mat - u_skin_color, mat - u_skin_color) < 0.005
+                          ? 1.0 : 0.0, 0.0, 1.0);
+    // Approximate: pixels close to skin_color are skin
+    float skin_w = 1.0 - clamp(length(mat - u_skin_color) * 4.0, 0.0, 1.0);
+
     // Ambient
-    vec3 ambient = u_ambient * u_skin_color;
+    vec3 ambient = u_ambient * mat;
 
-    // Diffuse
+    // Diffuse — eye-socket fill prevents concave shadow from hiding sclera
     float diff   = max(dot(norm, light_dir), 0.0);
-    vec3 diffuse = u_diffuse * diff * u_light_color * u_skin_color;
+    float e_fill = clamp(G(v_uv, vec2(0.335, 0.385), 0.095, 0.062)
+                       + G(v_uv, vec2(0.665, 0.385), 0.095, 0.062), 0.0, 0.90);
+    diff = max(diff, 0.42 * e_fill);
+    vec3 diffuse = u_diffuse * diff * u_light_color * mat;
 
-    // Specular (Blinn-Phong)
-    float spec   = pow(max(dot(norm, half_dir), 0.0), u_shininess);
-    vec3 specular = u_specular * spec * u_light_color;
+    // Specular — reduced for non-skin (eyes/lips less shiny)
+    float spec_str = mix(0.10, u_specular, skin_w);
+    float spec     = pow(max(dot(norm, half_dir), 0.0), u_shininess);
+    vec3  specular = spec_str * spec * u_light_color;
 
-    // Subsurface scatter approximation (cheap)
-    float sss    = 0.08 * max(dot(-norm, light_dir), 0.0);
-    vec3 scatter = sss * vec3(0.95, 0.55, 0.45) * u_skin_color;
+    // Subsurface scatter — skin only
+    float sss    = 0.08 * skin_w * max(dot(-norm, light_dir), 0.0);
+    vec3 scatter = sss * vec3(0.95, 0.55, 0.45) * mat;
 
     // Rim lighting — anime-style cool blue edge glow
     float rim      = pow(1.0 - max(dot(norm, view_dir), 0.0), 4.0);
-    vec3 rim_light = 0.25 * rim * vec3(0.70, 0.85, 1.0);
+    vec3 rim_light = 0.20 * rim * vec3(0.68, 0.84, 1.0);
 
-    vec3 color   = ambient + diffuse + specular + scatter + rim_light;
-    out_color    = vec4(color, 1.0);
+    vec3 color = ambient + diffuse + specular + scatter + rim_light;
+    out_color  = vec4(color, 1.0);
 }
 """
 
@@ -94,7 +184,6 @@ class FaceRenderer:
 
         self._build_program()
         self._build_buffers()
-        self._disp_buffer = None
         self._init_disp_buffer()
 
         # Camera + light
@@ -105,7 +194,7 @@ class FaceRenderer:
             glm.vec3(0, 0, 0),
             glm.vec3(0, 1, 0)
         )
-        self._view_t = glm.transpose(self.view)   # pre-transposed for upload
+        self._view_t = glm.transpose(self.view)
 
         light = face_cfg["light"]
         self.light_pos   = glm.vec3(*light["position"])
@@ -118,7 +207,6 @@ class FaceRenderer:
         self.specular   = skin["specular"]
         self.shininess  = skin["shininess"]
 
-        # Head transform
         self.tilt_deg = 0.0
         self.gaze_deg = 0.0
 
@@ -133,11 +221,13 @@ class FaceRenderer:
     def _build_buffers(self):
         verts  = self.mesh.vertices.flatten()
         norms  = self.mesh.normals.flatten()
+        uvs    = self.mesh.uvs.flatten()
         disps  = np.zeros_like(verts)
         idxs   = self.mesh.indices
 
         self.vbo_pos  = self.ctx.buffer(verts.astype("f4").tobytes())
         self.vbo_norm = self.ctx.buffer(norms.astype("f4").tobytes())
+        self.vbo_uv   = self.ctx.buffer(uvs.astype("f4").tobytes())
         self.vbo_disp = self.ctx.buffer(disps.astype("f4").tobytes())
         self.ibo      = self.ctx.buffer(idxs.astype("i4").tobytes())
 
@@ -147,6 +237,7 @@ class FaceRenderer:
                 (self.vbo_pos,  "3f", "in_position"),
                 (self.vbo_norm, "3f", "in_normal"),
                 (self.vbo_disp, "3f", "in_displacement"),
+                (self.vbo_uv,   "2f", "in_uv"),
             ],
             self.ibo,
         )
@@ -158,7 +249,6 @@ class FaceRenderer:
     # ── per-frame ────────────────────────────────────────────────────
 
     def update_displacements(self, displacements: np.ndarray):
-        """Upload new displacement array to GPU. Called every frame."""
         self._disp_data = displacements.astype(np.float32)
         self.vbo_disp.write(self._disp_data.flatten().tobytes())
 
@@ -167,15 +257,13 @@ class FaceRenderer:
         self.gaze_deg = gaze_deg
 
     def render(self, width: int, height: int):
-        self.ctx.clear(0.08, 0.08, 0.10, 1.0)
+        self.ctx.clear(0.07, 0.07, 0.09, 1.0)
         self.ctx.enable(moderngl.DEPTH_TEST)
 
-        # Build model matrix: head tilt + gaze
         model = glm.mat4(1.0)
         model = glm.rotate(model, glm.radians(self.tilt_deg), glm.vec3(0, 0, 1))
         model = glm.rotate(model, glm.radians(self.gaze_deg), glm.vec3(0, 1, 0))
 
-        # Projection
         aspect = width / max(height, 1)
         proj   = glm.perspective(
             glm.radians(self.face_cfg["camera"]["fov"]),
@@ -186,14 +274,11 @@ class FaceRenderer:
 
         normal_mat = glm.mat3(glm.transpose(glm.inverse(model)))
 
-        # Set uniforms — PyGLM bytes() is row-major; OpenGL needs column-major.
-        # Transpose mat4/mat3 before bytes() to fix the memory layout.
         self.prog["u_model"].write(bytes(glm.transpose(model)))
         self.prog["u_view"].write(bytes(self._view_t))
         self.prog["u_proj"].write(bytes(glm.transpose(proj)))
         self.prog["u_normal_mat"].write(bytes(glm.transpose(normal_mat)))
 
-        # vec3 uniforms are fine — no row/column ambiguity
         self.prog["u_light_pos"].write(bytes(self.light_pos))
         self.prog["u_light_color"].write(bytes(self.light_color))
         self.prog["u_view_pos"].write(bytes(self.view_pos))
@@ -209,6 +294,7 @@ class FaceRenderer:
     def destroy(self):
         self.vbo_pos.release()
         self.vbo_norm.release()
+        self.vbo_uv.release()
         self.vbo_disp.release()
         self.ibo.release()
         self.vao.release()

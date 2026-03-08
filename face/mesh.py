@@ -2,11 +2,19 @@
 mesh.py — RAEON Face Mesh Generator
 
 Generates a procedural face mesh as a parametric surface.
-Anime-style: V-chin silhouette + Gaussian feature bumps (eye sockets,
-brow ridges, nose bridge/tip, lips, cheekbones).
+Anime-style: V-chin silhouette + Gaussian feature bumps + per-vertex colours.
 
-Vertex groups are auto-labeled from face.json region definitions.
-No external 3D model needed — face is born from math.
+Per-vertex colour palette:
+  (1,1,1)           — skin (shader uses u_skin_color)
+  dark-brown arch   — eyebrows
+  off-white circle  — sclera
+  hazel circle      — iris
+  near-black dot    — pupil
+  bright spot       — eye highlight
+  rosy rect         — lips
+
+Vertex groups auto-labelled from face.json region definitions.
+No external 3-D model — face is born from math.
 """
 
 import math
@@ -34,7 +42,8 @@ class FaceMesh:
         self.vertices  = None   # (N, 3) float32
         self.normals   = None   # (N, 3) float32
         self.uvs       = None   # (N, 2) float32
-        self.indices   = None   # (M, 3) int32
+        self.colors    = None   # (N, 3) float32  — per-vertex RGB
+        self.indices   = None   # (M,)   int32
         self.groups    = {}     # region_name -> [vertex_indices]
 
         self._build()
@@ -49,6 +58,7 @@ class FaceMesh:
         verts   = np.zeros((n, 3), dtype=np.float32)
         normals = np.zeros((n, 3), dtype=np.float32)
         uvs     = np.zeros((n, 2), dtype=np.float32)
+        colors  = np.zeros((n, 3), dtype=np.float32)
         groups  = defaultdict(list)
 
         idx = 0
@@ -59,10 +69,12 @@ class FaceMesh:
 
                 x, y, z = self._parametric(u, v)
                 nx, ny, nz = self._normal(u, v)
+                cr, cg, cb = self._face_colors(u, v)
 
                 verts[idx]   = [x, y, z]
                 normals[idx] = [nx, ny, nz]
                 uvs[idx]     = [u, v]
+                colors[idx]  = [cr, cg, cb]
 
                 self._label(idx, u, v, groups)
                 idx += 1
@@ -80,55 +92,127 @@ class FaceMesh:
         self.vertices = verts
         self.normals  = normals
         self.uvs      = uvs
+        self.colors   = colors
         self.indices  = np.array(faces, dtype=np.int32)
         self.groups   = dict(groups)
 
-    # ── anime face shape ─────────────────────────────────────────────
+    # ── per-vertex colour ─────────────────────────────────────────────
+
+    def _face_colors(self, u: float, v: float) -> tuple:
+        """
+        Return (r, g, b) for this vertex.
+        (1, 1, 1) = "use shader skin colour" (default).
+        Any other value = direct base material colour (still receives lighting).
+
+        UV→world scale at eye level: ∂x/∂u ≈ 0.57, ∂y/∂v ≈ 0.88
+        → for a circle in screen-space: su = sv * 1.55
+
+        Layer order (later = on top):
+          skin → lips → sclera → iris → pupil → highlight → eyebrow
+        """
+
+        def G(u0, v0, su, sv):
+            du = (u - u0) / su
+            dv = (v - v0) / sv
+            return math.exp(-0.5 * (du * du + dv * dv))
+
+        def blend(base, col, alpha):
+            a = min(max(alpha, 0.0), 1.0)
+            return (base[0] + (col[0] - base[0]) * a,
+                    base[1] + (col[1] - base[1]) * a,
+                    base[2] + (col[2] - base[2]) * a)
+
+        c = (1.0, 1.0, 1.0)   # start: pure skin
+
+        # ── Lips ──────────────────────────────────────────────────
+        # su/sv ratio ≈ 1.55 compensated
+        lip_w = (G(0.50, 0.698, 0.130, 0.038) * 0.85
+               + G(0.50, 0.738, 0.118, 0.034) * 0.95)
+        if lip_w > 0.05:
+            c = blend(c, (0.80, 0.46, 0.44), min(lip_w, 1.0))
+
+        # ── Eyes (left u0=0.335, right u0=0.665) ──────────────────
+        # All Gaussians use su ≈ sv * 1.55 for circles in screen-space
+        for u0 in (0.335, 0.665):
+            v0 = 0.385
+
+            # Sclera — almond-shaped off-white
+            # su=0.047 ≈ sv(0.030)*1.55 → ~circle on screen
+            scl = G(u0, v0, 0.047, 0.030) * 1.5
+            if scl > 0.10:
+                c = blend(c, (0.93, 0.91, 0.89), min(scl, 1.0))
+
+                # Iris — warm dark hazel circle
+                ir = G(u0, v0, 0.028, 0.018) * 2.5
+                c  = blend(c, (0.22, 0.13, 0.08), min(ir, 1.0))
+
+                # Pupil — near-black dot
+                pu = G(u0, v0 + 0.002, 0.016, 0.010) * 3.5
+                c  = blend(c, (0.04, 0.03, 0.02), min(pu, 1.0))
+
+                # Specular highlight — bright crescent top-left
+                hi = G(u0 - 0.010, v0 - 0.010, 0.009, 0.006) * 5.0
+                c  = blend(c, (0.97, 0.97, 1.00), min(hi, 1.0))
+
+        # ── Eyebrows — dark brown arch (ON TOP of everything) ─────
+        # su ≈ sv * 1.55 for consistent stroke width
+        for u0, sign in ((0.326, -1.0), (0.674, +1.0)):
+            bv = 0.262
+            # Main arch body — thicker stroke
+            bw  = G(u0, bv,              0.062, 0.016) * 2.8
+            # Inner head — tapers down slightly at nose side
+            bw += G(u0 - sign * 0.038, bv + 0.005, 0.022, 0.014) * 2.0
+            # Outer tail — tapers thin toward temple
+            bw += G(u0 + sign * 0.036, bv - 0.004, 0.022, 0.013) * 1.8
+
+            bw = min(bw, 1.0)
+            if bw > 0.12:
+                c = blend(c, (0.10, 0.07, 0.04), bw)
+
+        return c
+
+    # ── anime face shape ──────────────────────────────────────────────
 
     def _anime_width(self, v: float) -> float:
         """
-        Anime face silhouette: width multiplier as a function of v.
-        v=0 = top of head, v=1 = chin tip.
-          Crown      (v 0.00-0.20): round top, 1.0 -> 0.92
-          Cheekbones (v 0.20-0.45): outward swell, 0.92 -> peak ~1.0 -> 0.92
-          Jaw        (v 0.45-0.72): linear taper,  0.92 -> 0.70  (CONTINUOUS at 0.45)
-          Chin       (v 0.72-1.00): sharp V-point, 0.70 -> 0     (CONTINUOUS at 0.72)
-        All section boundaries are C0-continuous (no width jumps).
+        Silhouette: width multiplier as fn of v (0=crown, 1=chin).
+          Crown      v 0.00-0.20 : 1.00 -> 0.92
+          Cheekbones v 0.20-0.45 : 0.92 -> peak ~1.00 -> 0.92  (C0)
+          Jaw        v 0.45-0.72 : 0.92 -> 0.70                (C0)
+          Chin       v 0.72-1.00 : 0.70 -> 0  sharp V          (C0)
         """
         if v < 0.20:
             t = v / 0.20
-            return 1.0 - 0.08 * t * t          # 1.00 -> 0.92
+            return 1.0 - 0.08 * t * t
         elif v < 0.45:
             t = (v - 0.20) / 0.25
-            return 0.92 + 0.08 * math.sin(t * math.pi)  # 0.92 -> peak -> 0.92
+            return 0.92 + 0.08 * math.sin(t * math.pi)
         elif v < 0.72:
             t = (v - 0.45) / 0.27
-            return 0.92 - 0.22 * t             # 0.92 -> 0.70
+            return 0.92 - 0.22 * t
         else:
             t = (v - 0.72) / 0.28
-            return 0.70 - 0.70 * (t ** 1.5)   # 0.70 -> 0 (V-chin)
+            return 0.70 - 0.70 * (t ** 1.5)
 
     def _eye_socket_scale(self, u: float, v: float) -> float:
         """
-        Radial scale factor for eye socket areas (< 1 = pulls vertex toward
-        head centre along the surface normal direction).  Applied to both x
-        and z so the depression follows the surface curvature instead of
-        creating a flat step.
+        Radial scale < 1 pulls the eye-socket region inward along both x and z,
+        creating a smooth bowl depression that follows surface curvature.
         """
-        def G(u0, v0, su, sv, depth):
+        def G(u0, v0, su, sv, d):
             du = (u - u0) / su
             dv = (v - v0) / sv
-            return depth * math.exp(-0.5 * (du * du + dv * dv))
+            return d * math.exp(-0.5 * (du * du + dv * dv))
 
-        scale = 0.0
-        scale += G(0.33, 0.40, 0.155, 0.085, -0.105)   # left socket
-        scale += G(0.67, 0.40, 0.155, 0.085, -0.105)   # right socket
-        return 1.0 + scale   # range ≈ 0.905..1.0
+        s = 0.0
+        s += G(0.335, 0.390, 0.148, 0.082, -0.072)   # left  (shallower → less shadow)
+        s += G(0.665, 0.390, 0.148, 0.082, -0.072)   # right
+        return 1.0 + s
 
     def _anime_features(self, u: float, v: float) -> float:
         """
-        Z-axis Gaussian bumps (positive = protrude, negative = sink).
-        Eye sockets are handled separately via _eye_socket_scale.
+        Z-axis Gaussian bumps. Eye sockets handled by _eye_socket_scale.
+        Positive = protrude, negative = sink.
         """
         def G(u0, v0, su, sv, amp):
             du = (u - u0) / su
@@ -137,78 +221,88 @@ class FaceMesh:
 
         z = 0.0
 
-        # Brow ridges (shelf above eyes)
-        z += G(0.33, 0.30, 0.110, 0.040, +0.048)   # left
-        z += G(0.67, 0.30, 0.110, 0.040, +0.048)   # right
+        # ── Brows — sharper ridge casts a clear shadow ──────────
+        z += G(0.325, 0.278, 0.060, 0.020, +0.068)   # left  brow arch
+        z += G(0.675, 0.278, 0.060, 0.020, +0.068)   # right brow arch
 
-        # Nose bridge (thin ridge down the centre)
-        z += G(0.50, 0.46, 0.030, 0.085, +0.050)
+        # ── Eyelid anatomy ──────────────────────────────────────
+        # Upper lid crease shelf (overhangs eye, casts lid shadow)
+        z += G(0.335, 0.352, 0.072, 0.013, +0.035)   # left
+        z += G(0.665, 0.352, 0.072, 0.013, +0.035)   # right
+        # Lower lid ridge (defines bottom of eye)
+        z += G(0.335, 0.442, 0.062, 0.011, +0.024)   # left
+        z += G(0.665, 0.442, 0.062, 0.011, +0.024)   # right
 
-        # Nose tip (rounded button)
-        z += G(0.50, 0.60, 0.050, 0.042, +0.095)
+        # ── Nose ────────────────────────────────────────────────
+        # Bridge — narrow vertical ridge
+        z += G(0.500, 0.460, 0.028, 0.090, +0.052)
+        # Tip — rounded button
+        z += G(0.500, 0.605, 0.048, 0.040, +0.098)
+        # Ala (nostril wings) — outward flare
+        z += G(0.428, 0.618, 0.032, 0.026, +0.045)   # left
+        z += G(0.572, 0.618, 0.032, 0.026, +0.045)   # right
+        # Nostril base crease — subtle dip under ala
+        z += G(0.435, 0.635, 0.022, 0.018, -0.018)   # left
+        z += G(0.565, 0.635, 0.022, 0.018, -0.018)   # right
 
-        # Nostrils (slight outward flare)
-        z += G(0.43, 0.62, 0.025, 0.025, +0.030)   # left
-        z += G(0.57, 0.62, 0.025, 0.025, +0.030)   # right
+        # ── Mouth ───────────────────────────────────────────────
+        # Philtrum groove — indent above upper lip
+        z += G(0.500, 0.662, 0.022, 0.022, -0.020)
+        # Upper lip — cupid's bow
+        z += G(0.500, 0.698, 0.100, 0.026, +0.068)
+        # Lip groove / separation line
+        z += G(0.500, 0.716, 0.088, 0.010, -0.016)
+        # Lower lip — fuller
+        z += G(0.500, 0.738, 0.092, 0.032, +0.078)
+        # Chin dimple
+        z += G(0.500, 0.820, 0.028, 0.022, -0.015)
 
-        # Upper lip (cupid's bow)
-        z += G(0.50, 0.695, 0.105, 0.026, +0.065)
+        # ── Cheekbones ──────────────────────────────────────────
+        z += G(0.215, 0.500, 0.082, 0.095, +0.042)   # left
+        z += G(0.785, 0.500, 0.082, 0.095, +0.042)   # right
 
-        # Lower lip (fuller)
-        z += G(0.50, 0.735, 0.095, 0.032, +0.075)
-
-        # Cheekbones (subtle outward push)
-        z += G(0.22, 0.50, 0.085, 0.095, +0.040)   # left
-        z += G(0.78, 0.50, 0.085, 0.095, +0.040)   # right
+        # ── Nasolabial folds — subtle groove cheek-to-mouth ─────
+        z += G(0.400, 0.600, 0.022, 0.060, -0.012)   # left
+        z += G(0.600, 0.600, 0.022, 0.060, -0.012)   # right
 
         return z
 
-    # ── parametric surface ───────────────────────────────────────────
+    # ── parametric surface ────────────────────────────────────────────
 
     def _parametric(self, u: float, v: float):
-        """Map (u,v) -> (x,y,z) anime face surface point."""
-        # u=0 left, u=1 right; theta sweeps front hemisphere only
-        # v=0 top,  v=1 bottom
-        #
-        # Phi range: 0.10*pi..pi (18 deg to 180 deg)
-        #   Top (v=0):  phi=18 deg → sin=0.31 → round crown (not a point)
-        #   Mid (v=~0.44): phi=108 deg → sin=0.95 → widest zone
-        #   Bottom (v=1): phi=180 deg → sin=0 → sharp V-chin
-        theta = (u - 0.5) * math.pi * 0.56   # +/-~50 deg arc — flatter, no wrap artifacts
-        phi   = math.pi * (0.10 + v * 0.90)  # 18..180 deg
+        """Map (u,v) -> (x,y,z) on anime face surface."""
+        # Phi range 18..180 deg: round crown (not a pole-point), V-chin
+        # Theta ±50 deg: front-facing, no edge wrap artifacts
+        theta = (u - 0.5) * math.pi * 0.56
+        phi   = math.pi * (0.10 + v * 0.90)
 
         sin_phi   = math.sin(phi)
         cos_theta = math.cos(theta)
         sin_theta = math.sin(theta)
 
-        # Silhouette width profile
         w = self._anime_width(v)
 
-        # Base sphere position
         x_base = self.width * w * sin_phi * sin_theta
         z_base = self.depth * sin_phi * cos_theta
 
-        # Eye socket: radial depression (scales x AND z toward head centre)
         rs = self._eye_socket_scale(u, v)
-        x = x_base * rs
-        z = z_base * rs + self.depth * self._anime_features(u, v)
-
-        y = self.height * (0.52 - v)
+        x  = x_base * rs
+        z  = z_base * rs + self.depth * self._anime_features(u, v)
+        y  = self.height * (0.52 - v)
 
         return float(x), float(y), float(z)
 
     def _normal(self, u: float, v: float):
-        """Approximate outward normal by finite difference."""
+        """Outward surface normal via finite difference."""
         eps = 0.001
         x0, y0, z0 = self._parametric(u, v)
-
         xu, yu, zu = self._parametric(min(u + eps, 1.0), v)
         xv, yv, zv = self._parametric(u, min(v + eps, 1.0))
 
         du = np.array([xu - x0, yu - y0, zu - z0])
         dv = np.array([xv - x0, yv - y0, zv - z0])
 
-        n = np.cross(dv, du)   # dv x du gives outward-facing normals
+        n  = np.cross(dv, du)   # dv x du → outward-facing
         ln = np.linalg.norm(n)
         if ln < 1e-8:
             return 0.0, 0.0, 1.0
@@ -216,9 +310,8 @@ class FaceMesh:
         return float(n[0]), float(n[1]), float(n[2])
 
     def _label(self, idx: int, u: float, v: float, groups: dict):
-        """Assign vertex to face regions based on (u,v) position."""
-        regions = self.cfg["regions"]
-        for name, bounds in regions.items():
+        """Assign vertex to UV-defined face regions."""
+        for name, bounds in self.cfg["regions"].items():
             u_min, u_max = bounds["u"]
             v_min, v_max = bounds["v"]
             if u_min <= u <= u_max and v_min <= v <= v_max:
