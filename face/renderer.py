@@ -75,7 +75,11 @@ void main() {
     float sss    = 0.08 * max(dot(-norm, light_dir), 0.0);
     vec3 scatter = sss * vec3(0.95, 0.55, 0.45) * u_skin_color;
 
-    vec3 color   = ambient + diffuse + specular + scatter;
+    // Rim lighting — anime-style cool blue edge glow
+    float rim      = pow(1.0 - max(dot(norm, view_dir), 0.0), 4.0);
+    vec3 rim_light = 0.25 * rim * vec3(0.70, 0.85, 1.0);
+
+    vec3 color   = ambient + diffuse + specular + scatter + rim_light;
     out_color    = vec4(color, 1.0);
 }
 """
