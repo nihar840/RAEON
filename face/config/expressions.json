@@ -1,0 +1,123 @@
+{
+  "_comment": "RAEON Expression Config — fully editable. Add/remove/tune freely.",
+
+  "expressions": {
+
+    "eye_openness": {
+      "description": "How open the eyes are. 0=closed, 1=wide open",
+      "default": 0.6,
+      "range": [0.0, 1.0],
+      "interpolation": "smooth",
+      "displacements": {
+        "eye_left":  { "axis": "y", "magnitude": 0.07, "mode": "expand"  },
+        "eye_right": { "axis": "y", "magnitude": 0.07, "mode": "expand"  }
+      }
+    },
+
+    "eyebrow_angle": {
+      "description": "Brow raise/furrow. positive=raise, negative=furrow",
+      "default": 0.0,
+      "range": [-1.0, 1.0],
+      "interpolation": "smooth",
+      "displacements": {
+        "brow_left":  { "axis": "y", "magnitude": 0.05 },
+        "brow_right": { "axis": "y", "magnitude": 0.05 }
+      }
+    },
+
+    "brow_scrunch": {
+      "description": "Inner brows pulled together. anger/concentration",
+      "default": 0.0,
+      "range": [0.0, 1.0],
+      "interpolation": "smooth",
+      "displacements": {
+        "brow_left":  { "axis": "x", "magnitude":  0.03, "mode": "inward" },
+        "brow_right": { "axis": "x", "magnitude": -0.03, "mode": "inward" }
+      }
+    },
+
+    "lip_curve": {
+      "description": "Smile/frown. positive=smile, negative=frown",
+      "default": 0.0,
+      "range": [-1.0, 1.0],
+      "interpolation": "elastic",
+      "displacements": {
+        "mouth_left":  { "axis": "y", "magnitude": 0.045 },
+        "mouth_right": { "axis": "y", "magnitude": 0.045 }
+      }
+    },
+
+    "lip_part": {
+      "description": "How open the mouth is. 0=closed, 1=open",
+      "default": 0.0,
+      "range": [0.0, 1.0],
+      "interpolation": "linear",
+      "displacements": {
+        "lip_upper": { "axis": "y", "magnitude":  0.03 },
+        "lip_lower": { "axis": "y", "magnitude": -0.05 }
+      }
+    },
+
+    "jaw_tension": {
+      "description": "Jaw clench/drop. positive=clench, negative=drop",
+      "default": 0.0,
+      "range": [-1.0, 1.0],
+      "interpolation": "linear",
+      "displacements": {
+        "jaw":       { "axis": "y", "magnitude": -0.04 },
+        "lip_lower": { "axis": "y", "magnitude": -0.02 }
+      }
+    },
+
+    "nose_flare": {
+      "description": "Nostril flare. surprise/anger",
+      "default": 0.0,
+      "range": [0.0, 1.0],
+      "interpolation": "smooth",
+      "displacements": {
+        "nose": { "axis": "x", "magnitude": 0.025, "mode": "expand" }
+      }
+    },
+
+    "cheek_raise": {
+      "description": "Cheeks lift up. genuine smile/joy",
+      "default": 0.0,
+      "range": [0.0, 1.0],
+      "interpolation": "smooth",
+      "displacements": {
+        "cheek_left":  { "axis": "y", "magnitude": 0.035 },
+        "cheek_right": { "axis": "y", "magnitude": 0.035 }
+      }
+    },
+
+    "head_tilt": {
+      "description": "Head tilt left/right. curiosity/empathy",
+      "default": 0.0,
+      "range": [-1.0, 1.0],
+      "interpolation": "smooth",
+      "is_head_transform": true,
+      "rotation_axis": "z",
+      "max_degrees": 18.0
+    },
+
+    "gaze_direction": {
+      "description": "Where RAEON is looking. -1=left, 0=center, 1=right",
+      "default": 0.0,
+      "range": [-1.0, 1.0],
+      "interpolation": "linear",
+      "is_head_transform": true,
+      "rotation_axis": "y",
+      "max_degrees": 22.0
+    }
+  },
+
+  "emotion_presets": {
+    "neutral":    { "eye_openness": 0.6, "eyebrow_angle": 0.0,  "lip_curve": 0.0,  "jaw_tension": 0.0, "cheek_raise": 0.0 },
+    "curiosity":  { "eye_openness": 0.9, "eyebrow_angle": 0.4,  "lip_curve": 0.1,  "head_tilt": 0.3,   "brow_scrunch": 0.1 },
+    "joy":        { "eye_openness": 0.8, "eyebrow_angle": 0.3,  "lip_curve": 0.9,  "cheek_raise": 0.8, "lip_part": 0.3 },
+    "focus":      { "eye_openness": 0.5, "eyebrow_angle": -0.1, "lip_curve": -0.1, "brow_scrunch": 0.4, "jaw_tension": 0.1 },
+    "surprise":   { "eye_openness": 1.0, "eyebrow_angle": 0.8,  "lip_part": 0.6,   "nose_flare": 0.5 },
+    "empathy":    { "eye_openness": 0.7, "eyebrow_angle": 0.2,  "lip_curve": 0.2,  "head_tilt": 0.4,   "cheek_raise": 0.3 },
+    "thinking":   { "eye_openness": 0.4, "eyebrow_angle": 0.1,  "lip_curve": 0.0,  "gaze_direction": 0.6, "brow_scrunch": 0.2 }
+  }
+}

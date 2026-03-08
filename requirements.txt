@@ -1,0 +1,10 @@
+# RAEON Face — Core renderer dependencies
+moderngl>=0.3.2
+glfw>=2.6.0
+PyGLM>=2.7.0
+numpy>=1.26.0
+Pillow>=10.0.0
+
+# SpaceDB integration (optional — face-only mode works without it)
+# Install theSpaceDB separately from D:/SpaceDB or GitHub
+# sentence-transformers>=2.7  (pulled in by theSpaceDB)
