@@ -86,6 +86,10 @@ vec3 face_material(vec2 uv) {
             0.0, 1.0);
     c = mix(c, vec3(0.82, 0.47, 0.45), a);
 
+    // ── Teeth — thin bright line at lip separation (on top of lips) ─
+    a = clamp(G(uv, vec2(0.500, 0.716), 0.058, 0.006) * 5.5, 0.0, 0.70);
+    c = mix(c, vec3(0.95, 0.94, 0.91), a);
+
     // ── Left eye ────────────────────────────────────────────────────
     // Sclera (off-white almond) — wider so it's clearly visible
     a = clamp(G(uv, vec2(0.335, 0.385), 0.062, 0.040) * 2.4, 0.0, 1.0);

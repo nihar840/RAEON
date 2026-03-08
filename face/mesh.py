@@ -176,20 +176,24 @@ class FaceMesh:
     def _anime_width(self, v: float) -> float:
         """
         Silhouette: width multiplier as fn of v (0=crown, 1=chin).
-          Crown      v 0.00-0.20 : 1.00 -> 0.92
-          Cheekbones v 0.20-0.45 : 0.92 -> peak ~1.00 -> 0.92  (C0)
-          Jaw        v 0.45-0.72 : 0.92 -> 0.70                (C0)
-          Chin       v 0.72-1.00 : 0.70 -> 0  sharp V          (C0)
+        Cylindrical model — width applied directly (no sin(phi)).
+          Crown      v 0.00-0.08 : 0.80 -> 1.00  (rounded top)
+          Forehead   v 0.08-0.22 : 1.00           (flat, full width)
+          Cheekbones v 0.22-0.45 : 1.00 -> 1.04 -> 1.00  (subtle swell)
+          Jaw        v 0.45-0.72 : 1.00 -> 0.70   (taper)
+          Chin       v 0.72-1.00 : 0.70 -> 0       (V-chin)
         """
-        if v < 0.20:
-            t = v / 0.20
-            return 1.0 - 0.08 * t * t
+        if v < 0.08:
+            t = v / 0.08
+            return 0.80 + 0.20 * math.sqrt(t)
+        elif v < 0.22:
+            return 1.0
         elif v < 0.45:
-            t = (v - 0.20) / 0.25
-            return 0.92 + 0.08 * math.sin(t * math.pi)
+            t = (v - 0.22) / 0.23
+            return 1.0 + 0.04 * math.sin(t * math.pi)
         elif v < 0.72:
             t = (v - 0.45) / 0.27
-            return 0.92 - 0.22 * t
+            return 1.0 - 0.30 * t
         else:
             t = (v - 0.72) / 0.28
             return 0.70 - 0.70 * (t ** 1.5)
@@ -211,7 +215,8 @@ class FaceMesh:
 
     def _anime_features(self, u: float, v: float) -> float:
         """
-        Z-axis Gaussian bumps. Eye sockets handled by _eye_socket_scale.
+        Z-axis Gaussian bumps — stronger amplitudes for cylindrical model.
+        Eye sockets handled by _eye_socket_scale.
         Positive = protrude, negative = sink.
         """
         def G(u0, v0, su, sv, amp):
@@ -221,69 +226,80 @@ class FaceMesh:
 
         z = 0.0
 
-        # ── Brows — sharper ridge casts a clear shadow ──────────
-        z += G(0.325, 0.278, 0.060, 0.020, +0.068)   # left  brow arch
-        z += G(0.675, 0.278, 0.060, 0.020, +0.068)   # right brow arch
+        # ── Brows — sharp ridge, casts clear shadow ────────────
+        z += G(0.325, 0.278, 0.060, 0.020, +0.088)   # left  brow arch
+        z += G(0.675, 0.278, 0.060, 0.020, +0.088)   # right brow arch
 
         # ── Eyelid anatomy ──────────────────────────────────────
         # Upper lid crease shelf (overhangs eye, casts lid shadow)
-        z += G(0.335, 0.352, 0.072, 0.013, +0.035)   # left
-        z += G(0.665, 0.352, 0.072, 0.013, +0.035)   # right
+        z += G(0.335, 0.352, 0.072, 0.013, +0.044)   # left
+        z += G(0.665, 0.352, 0.072, 0.013, +0.044)   # right
         # Lower lid ridge (defines bottom of eye)
-        z += G(0.335, 0.442, 0.062, 0.011, +0.024)   # left
-        z += G(0.665, 0.442, 0.062, 0.011, +0.024)   # right
+        z += G(0.335, 0.442, 0.062, 0.011, +0.032)   # left
+        z += G(0.665, 0.442, 0.062, 0.011, +0.032)   # right
 
-        # ── Nose ────────────────────────────────────────────────
+        # ── Nose — prominent ───────────────────────────────────
         # Bridge — narrow vertical ridge
-        z += G(0.500, 0.460, 0.028, 0.090, +0.052)
-        # Tip — rounded button
-        z += G(0.500, 0.605, 0.048, 0.040, +0.098)
+        z += G(0.500, 0.460, 0.028, 0.090, +0.068)
+        # Tip — rounded button (strong protrusion)
+        z += G(0.500, 0.605, 0.048, 0.040, +0.128)
         # Ala (nostril wings) — outward flare
-        z += G(0.428, 0.618, 0.032, 0.026, +0.045)   # left
-        z += G(0.572, 0.618, 0.032, 0.026, +0.045)   # right
-        # Nostril base crease — subtle dip under ala
-        z += G(0.435, 0.635, 0.022, 0.018, -0.018)   # left
-        z += G(0.565, 0.635, 0.022, 0.018, -0.018)   # right
+        z += G(0.428, 0.618, 0.032, 0.026, +0.058)   # left
+        z += G(0.572, 0.618, 0.032, 0.026, +0.058)   # right
+        # Nostril base crease — dip under ala
+        z += G(0.435, 0.635, 0.022, 0.018, -0.024)   # left
+        z += G(0.565, 0.635, 0.022, 0.018, -0.024)   # right
 
         # ── Mouth ───────────────────────────────────────────────
         # Philtrum groove — indent above upper lip
-        z += G(0.500, 0.662, 0.022, 0.022, -0.020)
+        z += G(0.500, 0.662, 0.022, 0.022, -0.028)
         # Upper lip — cupid's bow
-        z += G(0.500, 0.698, 0.100, 0.026, +0.068)
+        z += G(0.500, 0.698, 0.100, 0.026, +0.085)
         # Lip groove / separation line
-        z += G(0.500, 0.716, 0.088, 0.010, -0.016)
+        z += G(0.500, 0.716, 0.088, 0.010, -0.022)
         # Lower lip — fuller
-        z += G(0.500, 0.738, 0.092, 0.032, +0.078)
+        z += G(0.500, 0.738, 0.092, 0.032, +0.095)
         # Chin dimple
-        z += G(0.500, 0.820, 0.028, 0.022, -0.015)
+        z += G(0.500, 0.820, 0.028, 0.022, -0.020)
 
-        # ── Cheekbones ──────────────────────────────────────────
-        z += G(0.215, 0.500, 0.082, 0.095, +0.042)   # left
-        z += G(0.785, 0.500, 0.082, 0.095, +0.042)   # right
+        # ── Cheekbones — prominent ─────────────────────────────
+        z += G(0.215, 0.500, 0.082, 0.095, +0.058)   # left
+        z += G(0.785, 0.500, 0.082, 0.095, +0.058)   # right
 
-        # ── Nasolabial folds — subtle groove cheek-to-mouth ─────
-        z += G(0.400, 0.600, 0.022, 0.060, -0.012)   # left
-        z += G(0.600, 0.600, 0.022, 0.060, -0.012)   # right
+        # ── Nasolabial folds — groove cheek-to-mouth ────────────
+        z += G(0.400, 0.600, 0.022, 0.060, -0.018)   # left
+        z += G(0.600, 0.600, 0.022, 0.060, -0.018)   # right
 
         return z
 
     # ── parametric surface ────────────────────────────────────────────
 
     def _parametric(self, u: float, v: float):
-        """Map (u,v) -> (x,y,z) on anime face surface."""
-        # Phi range 18..180 deg: round crown (not a pole-point), V-chin
-        # Theta ±50 deg: front-facing, no edge wrap artifacts
-        theta = (u - 0.5) * math.pi * 0.56
-        phi   = math.pi * (0.10 + v * 0.90)
+        """Map (u,v) -> (x,y,z) on anime face surface.
 
-        sin_phi   = math.sin(phi)
-        cos_theta = math.cos(theta)
+        Cylindrical model: horizontal cross-section is a circular arc
+        (sin(theta)/cos(theta)), width from _anime_width(), depth envelope
+        rounds the crown and chin. No sin(phi) — forehead stays wide.
+        """
+        theta = (u - 0.5) * math.pi * 0.56   # ±50° horizontal arc
         sin_theta = math.sin(theta)
+        cos_theta = math.cos(theta)
 
-        w = self._anime_width(v)
+        # Face width at this height (controls front-view silhouette)
+        fw = self._anime_width(v) * self.width
 
-        x_base = self.width * w * sin_phi * sin_theta
-        z_base = self.depth * sin_phi * cos_theta
+        # Depth envelope — rounded at crown, tapered at chin
+        depth_scale = 1.0
+        if v < 0.12:
+            t = v / 0.12
+            depth_scale = 0.70 + 0.30 * math.sqrt(t)
+        elif v > 0.82:
+            t = (v - 0.82) / 0.18
+            depth_scale = 1.0 - 0.92 * (t ** 1.2)
+        fd = self.depth * depth_scale
+
+        x_base = fw * sin_theta
+        z_base = fd * cos_theta
 
         rs = self._eye_socket_scale(u, v)
         x  = x_base * rs
