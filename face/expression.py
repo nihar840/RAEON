@@ -1,22 +1,17 @@
 """
 expression.py — RAEON Expression Engine
 
-Maps a CMA expression vector onto vertex displacements.
-Fully driven by expressions.json — change the config, change the face.
-No hardcoded expressions anywhere.
+ExpressionVector: 10-dimensional emotion state (brain contract — unchanged).
+ExpressionEngine: lerps current → target each frame, returns dict for shader.
 
-ExpressionVector (from CMA or emotion preset)
-    -> ExpressionEngine.compute(vector)
-    -> np.ndarray of shape (N, 3)  -- per-vertex displacement
-    -> Sent to GPU each frame
+SDF renderer reads expression values directly as uniforms — no vertex
+displacements, no group caching, no mesh dependency.
 """
 
 import json
 import math
-import numpy as np
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass
@@ -60,8 +55,9 @@ class ExpressionVector:
 
 class ExpressionEngine:
     """
-    Computes per-vertex displacement arrays from an ExpressionVector.
-    Reads config from expressions.json — fully data-driven.
+    Smooth expression blending engine.
+    Lerps current → target at 8% per frame, returns expression dict
+    for the SDF renderer to upload as uniforms.
     """
 
     INTERP = {
@@ -70,30 +66,15 @@ class ExpressionEngine:
         "elastic": lambda x: math.sin(x * math.pi / 2),
     }
 
-    def __init__(self, mesh, config_path: str = None):
+    def __init__(self, config_path: str = None):
         if config_path is None:
             config_path = Path(__file__).parent / "config" / "expressions.json"
         with open(config_path) as f:
             self.cfg = json.load(f)
 
-        self.mesh      = mesh
-        self._n        = mesh.vertex_count()
-        self._exprs    = self.cfg["expressions"]
-        self._presets  = self.cfg.get("emotion_presets", {})
-
-        # Current + target state
-        self.current   = ExpressionVector()
-        self.target    = ExpressionVector()
-
-        # Cache group → vertex index arrays for speed
-        self._group_cache = {
-            name: np.array(mesh.group_indices(name), dtype=np.int32)
-            for name in mesh.groups
-        }
-
-        # Head transform state (rotation only, not vertex displacement)
-        self.head_tilt_deg  = 0.0
-        self.gaze_dir_deg   = 0.0
+        self._presets = self.cfg.get("emotion_presets", {})
+        self.current  = ExpressionVector()
+        self.target   = ExpressionVector()
 
     # ── public API ───────────────────────────────────────────────────
 
@@ -117,102 +98,10 @@ class ExpressionEngine:
     def tick(self, dt: float = 0.016, speed: float = 0.08):
         """Advance interpolation. Call once per frame."""
         self.current = self.current.blend(self.target, speed)
-        self._update_head_transforms()
 
-    def compute_displacements(self) -> np.ndarray:
-        """
-        Returns (N, 3) displacement array for current expression state.
-        Add this to base vertex positions before upload to GPU.
-        """
-        displacements = np.zeros((self._n, 3), dtype=np.float32)
-        ev = self.current.to_dict()
-
-        for expr_name, expr_cfg in self._exprs.items():
-            if expr_cfg.get("is_head_transform"):
-                continue   # handled separately via head matrix
-
-            value = ev.get(expr_name, expr_cfg.get("default", 0.0))
-            if abs(value) < 1e-6:
-                continue
-
-            # Normalize value to [0..1] or [-1..1] based on range
-            lo, hi = expr_cfg["range"]
-            norm_val = (value - lo) / (hi - lo + 1e-8)
-
-            # Apply interpolation
-            interp_fn = self.INTERP.get(
-                expr_cfg.get("interpolation", "smooth"),
-                self.INTERP["smooth"]
-            )
-            norm_val = interp_fn(max(0.0, min(1.0, norm_val)))
-
-            # Center value: 0..1 range maps to -1..+1 effect
-            effect = (norm_val * 2.0 - 1.0) if lo < 0 else norm_val
-
-            # Apply per-group displacements
-            for group_name, disp_cfg in expr_cfg.get("displacements", {}).items():
-                indices = self._group_cache.get(group_name)
-                if indices is None or len(indices) == 0:
-                    continue
-
-                axis      = disp_cfg["axis"]
-                magnitude = disp_cfg["magnitude"]
-                mode      = disp_cfg.get("mode", "direct")
-
-                delta = self._compute_delta(
-                    indices, axis, magnitude, effect, mode
-                )
-                displacements[indices] += delta
-
-        return displacements
-
-    def get_head_rotation(self) -> tuple:
-        """Returns (tilt_deg, gaze_deg) for head transform matrix."""
-        return self.head_tilt_deg, self.gaze_dir_deg
-
-    # ── internal ────────────────────────────────────────────────────
-
-    def _compute_delta(self, indices, axis, magnitude, effect, mode):
-        n = len(indices)
-
-        if isinstance(axis, list):
-            # Multi-axis displacement
-            delta = np.zeros((n, 3), dtype=np.float32)
-            for ax in axis:
-                i = {"x": 0, "y": 1, "z": 2}[ax]
-                delta[:, i] += magnitude * effect
-            return delta
-
-        i = {"x": 0, "y": 1, "z": 2}[axis]
-        delta = np.zeros((n, 3), dtype=np.float32)
-
-        if mode == "expand":
-            # Each vertex moves away from group centroid
-            group_verts = self.mesh.vertices[indices]
-            centroid    = group_verts.mean(axis=0)
-            diff        = group_verts - centroid
-            diff_axis   = diff[:, i]
-            delta[:, i] = np.sign(diff_axis) * magnitude * effect
-        elif mode == "inward":
-            delta[:, i] = magnitude * effect
-        else:
-            delta[:, i] = magnitude * effect
-
-        return delta
-
-    def _update_head_transforms(self):
-        ev = self.current.to_dict()
-        for expr_name, expr_cfg in self._exprs.items():
-            if not expr_cfg.get("is_head_transform"):
-                continue
-            value    = ev.get(expr_name, 0.0)
-            max_deg  = expr_cfg.get("max_degrees", 20.0)
-            rot_axis = expr_cfg.get("rotation_axis", "y")
-            angle    = value * max_deg
-            if rot_axis == "z":
-                self.head_tilt_deg = angle
-            elif rot_axis == "y":
-                self.gaze_dir_deg  = angle
+    def get_expression_dict(self) -> dict:
+        """Return current expression state as a flat dict for the renderer."""
+        return self.current.to_dict()
 
     def presets(self) -> list:
         return list(self._presets.keys())

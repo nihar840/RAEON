@@ -1,5 +1,5 @@
 {
-  "_comment": "RAEON Expression Config — fully editable. Add/remove/tune freely.",
+  "_comment": "RAEON Expression Config — SDF renderer reads these as shader uniforms.",
 
   "expressions": {
 
@@ -7,107 +7,70 @@
       "description": "How open the eyes are. 0=closed, 1=wide open",
       "default": 0.6,
       "range": [0.0, 1.0],
-      "interpolation": "smooth",
-      "displacements": {
-        "eye_left":  { "axis": "y", "magnitude": 0.07, "mode": "expand"  },
-        "eye_right": { "axis": "y", "magnitude": 0.07, "mode": "expand"  }
-      }
+      "interpolation": "smooth"
     },
 
     "eyebrow_angle": {
       "description": "Brow raise/furrow. positive=raise, negative=furrow",
       "default": 0.0,
       "range": [-1.0, 1.0],
-      "interpolation": "smooth",
-      "displacements": {
-        "brow_left":  { "axis": "y", "magnitude": 0.05 },
-        "brow_right": { "axis": "y", "magnitude": 0.05 }
-      }
+      "interpolation": "smooth"
     },
 
     "brow_scrunch": {
       "description": "Inner brows pulled together. anger/concentration",
       "default": 0.0,
       "range": [0.0, 1.0],
-      "interpolation": "smooth",
-      "displacements": {
-        "brow_left":  { "axis": "x", "magnitude":  0.03, "mode": "inward" },
-        "brow_right": { "axis": "x", "magnitude": -0.03, "mode": "inward" }
-      }
+      "interpolation": "smooth"
     },
 
     "lip_curve": {
       "description": "Smile/frown. positive=smile, negative=frown",
       "default": 0.0,
       "range": [-1.0, 1.0],
-      "interpolation": "elastic",
-      "displacements": {
-        "mouth_left":  { "axis": "y", "magnitude": 0.045 },
-        "mouth_right": { "axis": "y", "magnitude": 0.045 }
-      }
+      "interpolation": "elastic"
     },
 
     "lip_part": {
       "description": "How open the mouth is. 0=closed, 1=open",
       "default": 0.0,
       "range": [0.0, 1.0],
-      "interpolation": "linear",
-      "displacements": {
-        "lip_upper": { "axis": "y", "magnitude":  0.03 },
-        "lip_lower": { "axis": "y", "magnitude": -0.05 }
-      }
+      "interpolation": "linear"
     },
 
     "jaw_tension": {
       "description": "Jaw clench/drop. positive=clench, negative=drop",
       "default": 0.0,
       "range": [-1.0, 1.0],
-      "interpolation": "linear",
-      "displacements": {
-        "jaw":       { "axis": "y", "magnitude": -0.04 },
-        "lip_lower": { "axis": "y", "magnitude": -0.02 }
-      }
+      "interpolation": "linear"
     },
 
     "nose_flare": {
       "description": "Nostril flare. surprise/anger",
       "default": 0.0,
       "range": [0.0, 1.0],
-      "interpolation": "smooth",
-      "displacements": {
-        "nose": { "axis": "x", "magnitude": 0.025, "mode": "expand" }
-      }
+      "interpolation": "smooth"
     },
 
     "cheek_raise": {
       "description": "Cheeks lift up. genuine smile/joy",
       "default": 0.0,
       "range": [0.0, 1.0],
-      "interpolation": "smooth",
-      "displacements": {
-        "cheek_left":  { "axis": "y", "magnitude": 0.035 },
-        "cheek_right": { "axis": "y", "magnitude": 0.035 }
-      }
+      "interpolation": "smooth"
     },
 
     "head_tilt": {
       "description": "Head tilt left/right. curiosity/empathy",
       "default": 0.0,
       "range": [-1.0, 1.0],
-      "interpolation": "smooth",
-      "is_head_transform": true,
-      "rotation_axis": "z",
-      "max_degrees": 18.0
+      "interpolation": "smooth"
     },
 
     "gaze_direction": {
       "description": "Where RAEON is looking. -1=left, 0=center, 1=right",
       "default": 0.0,
       "range": [-1.0, 1.0],
-      "interpolation": "linear",
-      "is_head_transform": true,
-      "rotation_axis": "y",
-      "max_degrees": 22.0
+      "interpolation": "linear"
     }
   },
 

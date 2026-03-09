@@ -1,220 +1,288 @@
 """
-renderer.py — RAEON Face Renderer
+renderer.py — RAEON Face Renderer (SDF Emoji Avatar)
 
-Pure ModernGL + PyGLM. No game engine. No Three.js. Ours entirely.
+Draws the entire face on a fullscreen quad using Signed Distance Functions.
+Expression vector (10 floats) passed as shader uniforms — each dimension
+continuously controls a visual parameter (eyelid height, mouth curve, etc.).
 
-Key design: procedural face colour computed in the FRAGMENT SHADER via
-interpolated UV coordinates.  This gives pixel-level precision for eyes,
-brows, and lips regardless of mesh vertex resolution.
-
-Colour layers (evaluated per-pixel from UV):
-  u_skin_color → lips → sclera → iris → pupil → highlight → eyebrows
-
-Lighting: Phong + subsurface scatter + rim light.
+No mesh, no vertex displacements, no textures, no external assets.
+Pixel-perfect, resolution-independent, extremely lightweight.
 """
 
 import numpy as np
-import glm
 import moderngl
 
+# ─────────────────────────────────────────────────────────────────────
+# Shaders
+# ─────────────────────────────────────────────────────────────────────
 
 VERT_SHADER = """
 #version 330 core
-
-in vec3 in_position;
-in vec3 in_normal;
-in vec3 in_displacement;
-in vec2 in_uv;
-
-uniform mat4 u_model;
-uniform mat4 u_view;
-uniform mat4 u_proj;
-uniform mat3 u_normal_mat;
-
-out vec3 v_normal;
-out vec3 v_frag_pos;
+in vec2 in_position;
 out vec2 v_uv;
 
 void main() {
-    vec3 pos    = in_position + in_displacement;
-    vec4 world  = u_model * vec4(pos, 1.0);
-
-    gl_Position = u_proj * u_view * world;
-    v_frag_pos  = vec3(world);
-    v_normal    = normalize(u_normal_mat * (in_normal + in_displacement * 0.3));
-    v_uv        = in_uv;
+    gl_Position = vec4(in_position, 0.0, 1.0);
+    v_uv = in_position * 0.5 + 0.5;
 }
 """
 
 FRAG_SHADER = """
 #version 330 core
-
-in vec3 v_normal;
-in vec3 v_frag_pos;
-in vec2 v_uv;
-
-uniform vec3  u_light_pos;
-uniform vec3  u_light_color;
-uniform vec3  u_view_pos;
-uniform vec3  u_skin_color;
-uniform float u_ambient;
-uniform float u_diffuse;
-uniform float u_specular;
-uniform float u_shininess;
-
+in  vec2 v_uv;
 out vec4 out_color;
 
-// ── Gaussian helper ─────────────────────────────────────────────────
-// su, sv are standard deviations in UV space (u-space scaled for circles)
-float G(vec2 uv, vec2 c, float su, float sv) {
-    vec2 d = (uv - c) / vec2(su, sv);
-    return exp(-0.5 * dot(d, d));
+// ── Expression uniforms (10 floats from ExpressionEngine) ──────────
+uniform float u_eye_openness;    // 0..1
+uniform float u_eyebrow_angle;   // -1..1
+uniform float u_brow_scrunch;    // 0..1
+uniform float u_lip_curve;       // -1..1  (+ smile, - frown)
+uniform float u_lip_part;        // 0..1
+uniform float u_jaw_tension;     // -1..1  (+ clench, - drop)
+uniform float u_nose_flare;      // 0..1
+uniform float u_cheek_raise;     // 0..1
+uniform float u_head_tilt;       // -1..1
+uniform float u_gaze_direction;  // -1..1
+
+// ── Colour uniforms ────────────────────────────────────────────────
+uniform vec3  u_skin_color;
+uniform vec3  u_blush_color;
+uniform vec3  u_lip_color;
+uniform vec3  u_brow_color;
+uniform vec3  u_sclera_color;
+uniform vec3  u_iris_color;
+uniform vec3  u_pupil_color;
+uniform vec3  u_highlight_color;
+uniform vec3  u_teeth_color;
+uniform vec3  u_bg_color;
+uniform float u_aspect;          // width / height
+
+// ── SDF primitives ─────────────────────────────────────────────────
+
+float sdCircle(vec2 p, vec2 c, float r) {
+    return length(p - c) - r;
 }
 
-// ── Procedural face colour from UV ──────────────────────────────────
-// All Gaussian sizes use su ≈ sv * 1.55 to produce circles on-screen.
-// (At eye level: dx/du ≈ 0.57, dy/dv ≈ 0.88 → ratio = 0.88/0.57 = 1.54)
-//
-// Layer order: skin → lips → sclera → iris → pupil → highlight → brow
-vec3 face_material(vec2 uv) {
-    vec3  c = u_skin_color;
-    float a;
-
-    // ── Lips ────────────────────────────────────────────────────────
-    a = clamp(G(uv, vec2(0.500, 0.695), 0.130, 0.040) * 0.90
-            + G(uv, vec2(0.500, 0.735), 0.118, 0.036) * 1.00,
-            0.0, 1.0);
-    c = mix(c, vec3(0.82, 0.47, 0.45), a);
-
-    // ── Teeth — thin bright line at lip separation (on top of lips) ─
-    a = clamp(G(uv, vec2(0.500, 0.716), 0.058, 0.006) * 5.5, 0.0, 0.70);
-    c = mix(c, vec3(0.95, 0.94, 0.91), a);
-
-    // ── Left eye ────────────────────────────────────────────────────
-    // Sclera (off-white almond) — wider so it's clearly visible
-    a = clamp(G(uv, vec2(0.335, 0.385), 0.062, 0.040) * 2.4, 0.0, 1.0);
-    c = mix(c, vec3(0.93, 0.91, 0.89), a);
-    // Iris (warm dark hazel)
-    a = clamp(G(uv, vec2(0.335, 0.386), 0.029, 0.019) * 2.6, 0.0, 1.0);
-    c = mix(c, vec3(0.23, 0.14, 0.09), a);
-    // Pupil (near-black)
-    a = clamp(G(uv, vec2(0.335, 0.387), 0.016, 0.010) * 3.8, 0.0, 1.0);
-    c = mix(c, vec3(0.04, 0.03, 0.02), a);
-    // Specular highlight (bright crescent top-left)
-    a = clamp(G(uv, vec2(0.326, 0.376), 0.009, 0.006) * 5.5, 0.0, 1.0);
-    c = mix(c, vec3(0.96, 0.96, 1.00), a);
-
-    // ── Right eye ───────────────────────────────────────────────────
-    // Sclera
-    a = clamp(G(uv, vec2(0.665, 0.385), 0.062, 0.040) * 2.4, 0.0, 1.0);
-    c = mix(c, vec3(0.93, 0.91, 0.89), a);
-    // Iris
-    a = clamp(G(uv, vec2(0.665, 0.386), 0.029, 0.019) * 2.6, 0.0, 1.0);
-    c = mix(c, vec3(0.23, 0.14, 0.09), a);
-    // Pupil
-    a = clamp(G(uv, vec2(0.665, 0.387), 0.016, 0.010) * 3.8, 0.0, 1.0);
-    c = mix(c, vec3(0.04, 0.03, 0.02), a);
-    // Highlight
-    a = clamp(G(uv, vec2(0.674, 0.376), 0.009, 0.006) * 5.5, 0.0, 1.0);
-    c = mix(c, vec3(0.96, 0.96, 1.00), a);
-
-    // ── Left eyebrow (arch: body + inner head + outer tail) ─────────
-    a = clamp(G(uv, vec2(0.326, 0.262), 0.060, 0.016) * 2.8   // main arch
-            + G(uv, vec2(0.290, 0.268), 0.022, 0.014) * 2.0   // inner head
-            + G(uv, vec2(0.360, 0.258), 0.022, 0.013) * 1.8,  // outer tail
-            0.0, 1.0);
-    c = mix(c, vec3(0.10, 0.07, 0.04), a);
-
-    // ── Right eyebrow (mirrored) ────────────────────────────────────
-    a = clamp(G(uv, vec2(0.674, 0.262), 0.060, 0.016) * 2.8
-            + G(uv, vec2(0.710, 0.268), 0.022, 0.014) * 2.0
-            + G(uv, vec2(0.640, 0.258), 0.022, 0.013) * 1.8,
-            0.0, 1.0);
-    c = mix(c, vec3(0.10, 0.07, 0.04), a);
-
-    return c;
+float sdEllipse(vec2 p, vec2 c, vec2 r) {
+    vec2 d = (p - c) / r;
+    return (length(d) - 1.0) * min(r.x, r.y);
 }
+
+float sdSegment(vec2 p, vec2 a, vec2 b) {
+    vec2 pa = p - a, ba = b - a;
+    float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    return length(pa - ba * h);
+}
+
+float sdRoundedRect(vec2 p, vec2 c, vec2 hs, float r) {
+    vec2 d = abs(p - c) - hs + r;
+    return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;
+}
+
+// Anti-aliased SDF fill: 1 inside, 0 outside, smooth edge
+float fill(float d, float edge) {
+    return 1.0 - smoothstep(-edge, edge, d);
+}
+
+// ── Main ───────────────────────────────────────────────────────────
 
 void main() {
-    vec3 norm      = normalize(v_normal);
-    vec3 light_dir = normalize(u_light_pos - v_frag_pos);
-    vec3 view_dir  = normalize(u_view_pos  - v_frag_pos);
-    vec3 half_dir  = normalize(light_dir + view_dir);
+    // Aspect-correct coords: center at (0,0), y range ~ -0.5..0.5
+    vec2 uv = v_uv - 0.5;
+    uv.x *= u_aspect;
 
-    // Material colour from procedural UV map
-    vec3 mat = face_material(v_uv);
+    // HEAD TILT — rotate entire coordinate space
+    float tilt_a = u_head_tilt * 0.26;   // ~15 deg max
+    float ca = cos(tilt_a), sa = sin(tilt_a);
+    uv = mat2(ca, -sa, sa, ca) * uv;
 
-    // How "skin-like" is this pixel? (1=skin, 0=eye/brow/lip)
-    float is_skin = clamp(dot(mat - u_skin_color, mat - u_skin_color) < 0.005
-                          ? 1.0 : 0.0, 0.0, 1.0);
-    // Approximate: pixels close to skin_color are skin
-    float skin_w = 1.0 - clamp(length(mat - u_skin_color) * 4.0, 0.0, 1.0);
+    vec3 color = u_bg_color;
+    float aa = 0.003;   // anti-alias edge width
 
-    // Ambient
-    vec3 ambient = u_ambient * mat;
+    // ════════════════════════════════════════════════════════════════
+    // 1. FACE OVAL — egg shape with V-chin taper
+    // ════════════════════════════════════════════════════════════════
+    vec2 face_c = vec2(0.0, 0.015);
+    vec2 face_r = vec2(0.185, 0.25);
 
-    // Diffuse — eye-socket fill prevents concave shadow from hiding sclera
-    float diff   = max(dot(norm, light_dir), 0.0);
-    float e_fill = clamp(G(v_uv, vec2(0.335, 0.385), 0.095, 0.062)
-                       + G(v_uv, vec2(0.665, 0.385), 0.095, 0.062), 0.0, 0.90);
-    diff = max(diff, 0.42 * e_fill);
-    vec3 diffuse = u_diffuse * diff * u_light_color * mat;
+    // Taper chin: narrow x-radius as y goes positive (below center)
+    float chin_taper = 1.0 - 0.38 * smoothstep(0.0, face_r.y, uv.y - face_c.y);
+    // Jaw tension: clench compresses, drop elongates
+    float jaw_sq = max(0.0, u_jaw_tension) * 0.010;
+    float jaw_drop = max(0.0, -u_jaw_tension) * 0.012;
 
-    // Specular — reduced for non-skin (eyes/lips less shiny)
-    float spec_str = mix(0.10, u_specular, skin_w);
-    float spec     = pow(max(dot(norm, half_dir), 0.0), u_shininess);
-    vec3  specular = spec_str * spec * u_light_color;
+    float face_d = sdEllipse(uv, face_c,
+        vec2(face_r.x * chin_taper - jaw_sq, face_r.y + jaw_drop));
+    float face_m = fill(face_d, aa);
+    color = mix(color, u_skin_color, face_m);
 
-    // Subsurface scatter — skin only
-    float sss    = 0.08 * skin_w * max(dot(-norm, light_dir), 0.0);
-    vec3 scatter = sss * vec3(0.95, 0.55, 0.45) * mat;
+    // Subtle 3D lighting gradient (lighter top-left, darker bottom-right)
+    color += face_m * 0.035 * (-uv.y * 0.8 + uv.x * 0.3);
 
-    // Rim lighting — anime-style cool blue edge glow
-    float rim      = pow(1.0 - max(dot(norm, view_dir), 0.0), 4.0);
-    vec3 rim_light = 0.20 * rim * vec3(0.68, 0.84, 1.0);
+    // ════════════════════════════════════════════════════════════════
+    // 2. NOSE — small line + nostril dots
+    // ════════════════════════════════════════════════════════════════
+    vec2 nose_tip = vec2(0.0, 0.055);
+    float nose_d = sdCircle(uv, nose_tip, 0.009);
+    float nose_a = fill(nose_d, aa * 1.5) * 0.25 * face_m;
+    color = mix(color, u_skin_color * 0.72, nose_a);
 
-    vec3 color = ambient + diffuse + specular + scatter + rim_light;
-    out_color  = vec4(color, 1.0);
+    // Nostrils — spread by nose_flare
+    float n_spread = 0.014 + u_nose_flare * 0.008;
+    float nl = sdCircle(uv, nose_tip + vec2(-n_spread, 0.006), 0.005);
+    float nr = sdCircle(uv, nose_tip + vec2( n_spread, 0.006), 0.005);
+    float nostril_a = fill(min(nl, nr), aa) * 0.30 * face_m;
+    color = mix(color, u_skin_color * 0.58, nostril_a);
+
+    // ════════════════════════════════════════════════════════════════
+    // 3. BLUSH — cheek_raise drives pink circles
+    // ════════════════════════════════════════════════════════════════
+    float bl_d = sdCircle(uv, vec2(-0.105, 0.06), 0.042);
+    float br_d = sdCircle(uv, vec2( 0.105, 0.06), 0.042);
+    float blush_a = u_cheek_raise * 0.38 * fill(min(bl_d, br_d), 0.025) * face_m;
+    color = mix(color, u_blush_color, blush_a);
+
+    // ════════════════════════════════════════════════════════════════
+    // 4. MOUTH — parabolic lip arcs + teeth
+    // ════════════════════════════════════════════════════════════════
+    vec2 mouth_c = vec2(0.0, 0.115);
+    float mw = 0.068;   // half-width of mouth
+    float total_part = u_lip_part * 0.028 + max(0.0, -u_jaw_tension) * 0.014;
+
+    // Upper and lower lip Y positions
+    float upper_y = mouth_c.y - total_part * 0.5;
+    float lower_y = mouth_c.y + total_part * 0.5;
+    float curve_k = u_lip_curve * 0.028;
+
+    // Draw lips as parabolic arcs
+    float x_norm = clamp(uv.x / mw, -1.0, 1.0);
+    float in_mouth = 1.0 - smoothstep(mw * 0.92, mw, abs(uv.x));
+
+    // Upper lip arc
+    float upper_target = upper_y - curve_k * x_norm * x_norm;
+    float ud = abs(uv.y - upper_target) - 0.0055;
+    float upper_a = fill(ud, aa) * in_mouth * face_m;
+    color = mix(color, u_lip_color, upper_a);
+
+    // Lower lip arc (slightly thicker)
+    float lower_target = lower_y - curve_k * x_norm * x_norm * 0.55;
+    float ld = abs(uv.y - lower_target) - 0.0072;
+    float lower_a = fill(ld, aa) * in_mouth * face_m;
+    color = mix(color, u_lip_color, lower_a);
+
+    // Teeth (visible when mouth open)
+    if (total_part > 0.006) {
+        float teeth_d = sdRoundedRect(uv, mouth_c,
+            vec2(mw * 0.55, total_part * 0.30), 0.004);
+        float teeth_a = fill(teeth_d, aa) * face_m
+                       * smoothstep(0.005, 0.016, total_part);
+        color = mix(color, u_teeth_color, teeth_a);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // 5. EYES (left and right)
+    // ════════════════════════════════════════════════════════════════
+    for (int side = -1; side <= 1; side += 2) {
+        float sx = float(side);
+        vec2 eye_c = vec2(sx * 0.068, -0.042);
+        vec2 eye_r = vec2(0.034, 0.022);
+
+        // Eyelid clipping — eye_openness controls visible band
+        float eo = u_eye_openness;
+        float lid_top = eye_c.y - eye_r.y * (eo * 1.5 - 0.7);
+        float lid_bot = eye_c.y + eye_r.y * (eo * 1.2 - 0.15);
+        // Cheek raise pushes lower lid up
+        lid_bot -= u_cheek_raise * 0.007;
+
+        float lid_vis = step(lid_top, uv.y) * step(uv.y, lid_bot);
+
+        // Sclera
+        float sclera_d = sdEllipse(uv, eye_c, eye_r);
+        float sclera_a = fill(sclera_d, aa) * lid_vis * face_m;
+        color = mix(color, u_sclera_color, sclera_a);
+
+        // Iris (shifted by gaze_direction)
+        float gaze_x = u_gaze_direction * 0.013;
+        vec2 iris_c = eye_c + vec2(gaze_x, 0.001);
+        float iris_d = sdCircle(uv, iris_c, 0.012);
+        float iris_a = fill(iris_d, aa) * sclera_a;
+        color = mix(color, u_iris_color, iris_a);
+
+        // Pupil
+        float pupil_d = sdCircle(uv, iris_c, 0.005);
+        float pupil_a = fill(pupil_d, aa) * iris_a;
+        color = mix(color, u_pupil_color, pupil_a);
+
+        // Specular highlight (opposite gaze side + above)
+        vec2 hi_c = iris_c + vec2(-gaze_x * 0.35 - sx * 0.004, -0.005);
+        float hi_d = sdCircle(uv, hi_c, 0.0035);
+        float hi_a = fill(hi_d, aa) * sclera_a;
+        color = mix(color, u_highlight_color, hi_a);
+
+        // Upper eyelid line
+        float lid_line_d = abs(uv.y - lid_top);
+        float lid_in_x = fill(sdEllipse(uv, eye_c, eye_r * 1.15), aa);
+        float lid_a = fill(lid_line_d - 0.001, aa * 0.8) * lid_in_x * face_m * 0.45;
+        color = mix(color, u_skin_color * 0.55, lid_a);
+
+        // Lower eyelid subtle line
+        float lid_bot_d = abs(uv.y - lid_bot);
+        float lid_bot_a = fill(lid_bot_d - 0.0008, aa * 0.8) * lid_in_x * face_m * 0.20;
+        color = mix(color, u_skin_color * 0.65, lid_bot_a);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // 6. EYEBROWS (left and right)
+    // ════════════════════════════════════════════════════════════════
+    for (int side = -1; side <= 1; side += 2) {
+        float sx = float(side);
+        float by_base = -0.090;
+        float by_off  = u_eyebrow_angle * 0.028;
+        float scrunch = u_brow_scrunch * 0.016 * sx;
+
+        // Brow as tapered line segment
+        vec2 inner = vec2(sx * 0.028 - scrunch,
+                          by_base + by_off + u_eyebrow_angle * 0.012);
+        vec2 outer = vec2(sx * 0.098,
+                          by_base + by_off - u_eyebrow_angle * 0.006);
+
+        // Taper: thicker at inner, thinner at outer
+        float along = dot(uv - inner, outer - inner)
+                     / dot(outer - inner, outer - inner);
+        along = clamp(along, 0.0, 1.0);
+        float thickness = mix(0.0062, 0.0028, along);
+
+        float brow_d = sdSegment(uv, inner, outer) - thickness;
+        float brow_a = fill(brow_d, aa) * face_m;
+        color = mix(color, u_brow_color, brow_a);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // 7. FACE EDGE — soft shadow at face boundary for depth
+    // ════════════════════════════════════════════════════════════════
+    float edge_shadow = smoothstep(-0.020, 0.0, face_d) * 0.12 * face_m;
+    color -= vec3(edge_shadow);
+
+    out_color = vec4(clamp(color, 0.0, 1.0), 1.0);
 }
 """
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Renderer class
+# ─────────────────────────────────────────────────────────────────────
+
 class FaceRenderer:
+    """SDF-based face renderer on a fullscreen quad."""
 
-    def __init__(self, ctx: moderngl.Context, mesh, face_cfg: dict):
-        self.ctx      = ctx
-        self.mesh     = mesh
+    def __init__(self, ctx: moderngl.Context, face_cfg: dict):
+        self.ctx = ctx
         self.face_cfg = face_cfg
-
         self._build_program()
-        self._build_buffers()
-        self._init_disp_buffer()
+        self._build_quad()
+        self._load_colors()
 
-        # Camera + light
-        cam  = face_cfg["camera"]
-        self.view_pos = glm.vec3(*cam["position"])
-        self.view = glm.lookAt(
-            self.view_pos,
-            glm.vec3(0, 0, 0),
-            glm.vec3(0, 1, 0)
-        )
-        self._view_t = glm.transpose(self.view)
-
-        light = face_cfg["light"]
-        self.light_pos   = glm.vec3(*light["position"])
-        self.light_color = glm.vec3(*light["color"])
-
-        skin = face_cfg["skin"]
-        self.skin_color = glm.vec3(*skin["base_color"])
-        self.ambient    = skin["ambient"]
-        self.diffuse    = skin["diffuse"]
-        self.specular   = skin["specular"]
-        self.shininess  = skin["shininess"]
-
-        self.tilt_deg = 0.0
-        self.gaze_deg = 0.0
-
-    # ── setup ────────────────────────────────────────────────────────
+    # ── build ───────────────────────────────────────────────────────
 
     def _build_program(self):
         self.prog = self.ctx.program(
@@ -222,84 +290,89 @@ class FaceRenderer:
             fragment_shader=FRAG_SHADER,
         )
 
-    def _build_buffers(self):
-        verts  = self.mesh.vertices.flatten()
-        norms  = self.mesh.normals.flatten()
-        uvs    = self.mesh.uvs.flatten()
-        disps  = np.zeros_like(verts)
-        idxs   = self.mesh.indices
+    def _build_quad(self):
+        """Fullscreen quad: 4 corners in NDC, 2 triangles."""
+        verts = np.array([
+            -1.0, -1.0,
+             1.0, -1.0,
+            -1.0,  1.0,
+             1.0,  1.0,
+        ], dtype=np.float32)
+        indices = np.array([0, 1, 2, 2, 1, 3], dtype=np.int32)
 
-        self.vbo_pos  = self.ctx.buffer(verts.astype("f4").tobytes())
-        self.vbo_norm = self.ctx.buffer(norms.astype("f4").tobytes())
-        self.vbo_uv   = self.ctx.buffer(uvs.astype("f4").tobytes())
-        self.vbo_disp = self.ctx.buffer(disps.astype("f4").tobytes())
-        self.ibo      = self.ctx.buffer(idxs.astype("i4").tobytes())
-
+        self.vbo = self.ctx.buffer(verts.tobytes())
+        self.ibo = self.ctx.buffer(indices.tobytes())
         self.vao = self.ctx.vertex_array(
             self.prog,
-            [
-                (self.vbo_pos,  "3f", "in_position"),
-                (self.vbo_norm, "3f", "in_normal"),
-                (self.vbo_disp, "3f", "in_displacement"),
-                (self.vbo_uv,   "2f", "in_uv"),
-            ],
+            [(self.vbo, "2f", "in_position")],
             self.ibo,
         )
 
-    def _init_disp_buffer(self):
-        n = self.mesh.vertex_count()
-        self._disp_data = np.zeros((n, 3), dtype=np.float32)
+    def _load_colors(self):
+        """Read face colours from config and upload as uniforms."""
+        skin = self.face_cfg["skin"]
+        self._color_map = {
+            "u_skin_color":      skin["base_color"],
+            "u_blush_color":     skin["blush_color"],
+            "u_lip_color":       skin["lip_color"],
+            "u_brow_color":      skin["brow_color"],
+            "u_sclera_color":    skin["sclera_color"],
+            "u_iris_color":      skin["iris_color"],
+            "u_pupil_color":     skin["pupil_color"],
+            "u_highlight_color": skin["highlight_color"],
+            "u_teeth_color":     skin["teeth_color"],
+        }
+        self._bg_color = self.face_cfg["background"]
 
-    # ── per-frame ────────────────────────────────────────────────────
+    # ── per-frame API ───────────────────────────────────────────────
 
-    def update_displacements(self, displacements: np.ndarray):
-        self._disp_data = displacements.astype(np.float32)
-        self.vbo_disp.write(self._disp_data.flatten().tobytes())
-
-    def update_head_rotation(self, tilt_deg: float, gaze_deg: float):
-        self.tilt_deg = tilt_deg
-        self.gaze_deg = gaze_deg
+    def update_expression(self, expr_dict: dict):
+        """Upload expression vector as 10 float uniforms."""
+        mapping = {
+            "eye_openness":   "u_eye_openness",
+            "eyebrow_angle":  "u_eyebrow_angle",
+            "brow_scrunch":   "u_brow_scrunch",
+            "lip_curve":      "u_lip_curve",
+            "lip_part":       "u_lip_part",
+            "jaw_tension":    "u_jaw_tension",
+            "nose_flare":     "u_nose_flare",
+            "cheek_raise":    "u_cheek_raise",
+            "head_tilt":      "u_head_tilt",
+            "gaze_direction": "u_gaze_direction",
+        }
+        for key, uniform in mapping.items():
+            val = float(expr_dict.get(key, 0.0))
+            try:
+                self.prog[uniform].value = val
+            except KeyError:
+                pass
 
     def render(self, width: int, height: int):
-        self.ctx.clear(0.07, 0.07, 0.09, 1.0)
-        self.ctx.enable(moderngl.DEPTH_TEST)
+        """Clear and draw the SDF face."""
+        bg = self._bg_color
+        self.ctx.clear(bg[0], bg[1], bg[2], 1.0)
+        self.ctx.disable(moderngl.DEPTH_TEST)
 
-        model = glm.mat4(1.0)
-        model = glm.rotate(model, glm.radians(self.tilt_deg), glm.vec3(0, 0, 1))
-        model = glm.rotate(model, glm.radians(self.gaze_deg), glm.vec3(0, 1, 0))
+        # Upload colours
+        for name, rgb in self._color_map.items():
+            try:
+                self.prog[name].value = tuple(rgb)
+            except KeyError:
+                pass
+        try:
+            self.prog["u_bg_color"].value = tuple(bg)
+        except KeyError:
+            pass
 
-        aspect = width / max(height, 1)
-        proj   = glm.perspective(
-            glm.radians(self.face_cfg["camera"]["fov"]),
-            aspect,
-            self.face_cfg["camera"]["near"],
-            self.face_cfg["camera"]["far"],
-        )
-
-        normal_mat = glm.mat3(glm.transpose(glm.inverse(model)))
-
-        self.prog["u_model"].write(bytes(glm.transpose(model)))
-        self.prog["u_view"].write(bytes(self._view_t))
-        self.prog["u_proj"].write(bytes(glm.transpose(proj)))
-        self.prog["u_normal_mat"].write(bytes(glm.transpose(normal_mat)))
-
-        self.prog["u_light_pos"].write(bytes(self.light_pos))
-        self.prog["u_light_color"].write(bytes(self.light_color))
-        self.prog["u_view_pos"].write(bytes(self.view_pos))
-        self.prog["u_skin_color"].write(bytes(self.skin_color))
-
-        self.prog["u_ambient"]   = self.ambient
-        self.prog["u_diffuse"]   = self.diffuse
-        self.prog["u_specular"]  = self.specular
-        self.prog["u_shininess"] = self.shininess
+        # Aspect ratio
+        self.prog["u_aspect"].value = width / max(height, 1)
 
         self.vao.render(moderngl.TRIANGLES)
 
+    # ── cleanup ─────────────────────────────────────────────────────
+
     def destroy(self):
-        self.vbo_pos.release()
-        self.vbo_norm.release()
-        self.vbo_uv.release()
-        self.vbo_disp.release()
+        self.vbo.release()
         self.ibo.release()
         self.vao.release()
         self.prog.release()

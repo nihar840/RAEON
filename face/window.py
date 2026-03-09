@@ -20,9 +20,7 @@ from pathlib import Path
 
 import glfw
 import moderngl
-import numpy as np
 
-from .mesh       import FaceMesh
 from .expression import ExpressionEngine, ExpressionVector
 from .renderer   import FaceRenderer
 
@@ -86,14 +84,10 @@ class RaeonWindow:
         glfw.swap_interval(1)   # vsync
 
         ctx = moderngl.create_context()
-        ctx.enable(moderngl.DEPTH_TEST)
-        # CULL_FACE enabled after confirming winding order
-        # ctx.enable(moderngl.CULL_FACE)
 
-        # Build mesh + expression + renderer
-        mesh     = FaceMesh()
-        engine   = ExpressionEngine(mesh)
-        renderer = FaceRenderer(ctx, mesh, self.face_cfg)
+        # Build expression engine + SDF renderer (no mesh needed)
+        engine   = ExpressionEngine()
+        renderer = FaceRenderer(ctx, self.face_cfg)
 
         glfw.set_key_callback(win, self._make_key_cb(engine))
 
@@ -119,15 +113,9 @@ class RaeonWindow:
                 elif isinstance(item, tuple) and item[0] == "preset":
                     engine.set_preset(item[1])
 
-            # Tick interpolation
+            # Tick interpolation + upload expression to shader
             engine.tick(dt)
-
-            # Compute displacements + head rotation
-            disps              = engine.compute_displacements()
-            tilt, gaze         = engine.get_head_rotation()
-
-            renderer.update_displacements(disps)
-            renderer.update_head_rotation(tilt, gaze)
+            renderer.update_expression(engine.get_expression_dict())
 
             # Get framebuffer size (handles HiDPI)
             fb_w, fb_h = glfw.get_framebuffer_size(win)
