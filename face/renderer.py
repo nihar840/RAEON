@@ -87,9 +87,10 @@ float fill(float d, float edge) {
 // ── Main ───────────────────────────────────────────────────────────
 
 void main() {
-    // Aspect-correct coords: center at (0,0), y range ~ -0.5..0.5
+    // Aspect-correct coords: center at (0,0)
     vec2 uv = v_uv - 0.5;
     uv.x *= u_aspect;
+    uv.y = -uv.y;   // flip Y — OpenGL is Y-up, face layout is Y-down
 
     // HEAD TILT — rotate entire coordinate space
     float tilt_a = u_head_tilt * 0.26;   // ~15 deg max
@@ -100,13 +101,14 @@ void main() {
     float aa = 0.003;   // anti-alias edge width
 
     // ════════════════════════════════════════════════════════════════
-    // 1. FACE OVAL — egg shape with V-chin taper
+    // 1. FACE OVAL — egg shape with V-chin taper + jaw angle
     // ════════════════════════════════════════════════════════════════
-    vec2 face_c = vec2(0.0, 0.015);
-    vec2 face_r = vec2(0.185, 0.25);
+    vec2 face_c = vec2(0.0, 0.012);
+    vec2 face_r = vec2(0.182, 0.248);
 
-    // Taper chin: narrow x-radius as y goes positive (below center)
-    float chin_taper = 1.0 - 0.38 * smoothstep(0.0, face_r.y, uv.y - face_c.y);
+    // Taper chin: narrow x-radius below center
+    float below = max(0.0, uv.y - face_c.y);
+    float chin_taper = 1.0 - 0.40 * smoothstep(0.0, face_r.y, below);
     // Jaw tension: clench compresses, drop elongates
     float jaw_sq = max(0.0, u_jaw_tension) * 0.010;
     float jaw_drop = max(0.0, -u_jaw_tension) * 0.012;
@@ -116,64 +118,112 @@ void main() {
     float face_m = fill(face_d, aa);
     color = mix(color, u_skin_color, face_m);
 
-    // Subtle 3D lighting gradient (lighter top-left, darker bottom-right)
-    color += face_m * 0.035 * (-uv.y * 0.8 + uv.x * 0.3);
+    // ── Facial shading for 3D depth ────────────────────────────────
+    // Top-light gradient (forehead bright, chin darker)
+    color += face_m * 0.032 * (-uv.y * 0.9 + uv.x * 0.25);
+
+    // Temple hollows — slight darkening at sides of forehead
+    float temple_l = exp(-0.5 * pow((uv.x + 0.14) / 0.05, 2.0)
+                         - 0.5 * pow((uv.y + 0.06) / 0.08, 2.0));
+    float temple_r = exp(-0.5 * pow((uv.x - 0.14) / 0.05, 2.0)
+                         - 0.5 * pow((uv.y + 0.06) / 0.08, 2.0));
+    color -= face_m * 0.025 * (temple_l + temple_r);
+
+    // Under-eye softness — warm shadow below eyes
+    float ue_l = exp(-0.5 * pow((uv.x + 0.065) / 0.04, 2.0)
+                     - 0.5 * pow((uv.y - 0.005) / 0.015, 2.0));
+    float ue_r = exp(-0.5 * pow((uv.x - 0.065) / 0.04, 2.0)
+                     - 0.5 * pow((uv.y - 0.005) / 0.015, 2.0));
+    color -= face_m * 0.020 * vec3(0.8, 0.9, 1.0) * (ue_l + ue_r);
+
+    // Jawline shadow — darkens near the chin boundary
+    float jaw_shadow = smoothstep(0.08, 0.20, below) * face_m * 0.035;
+    color -= vec3(jaw_shadow);
+
+    // Cheek warmth — subtle warm tint on cheek area
+    float chk_l = exp(-0.5 * pow((uv.x + 0.10) / 0.06, 2.0)
+                      - 0.5 * pow((uv.y - 0.03) / 0.05, 2.0));
+    float chk_r = exp(-0.5 * pow((uv.x - 0.10) / 0.06, 2.0)
+                      - 0.5 * pow((uv.y - 0.03) / 0.05, 2.0));
+    color += face_m * 0.018 * vec3(1.0, 0.6, 0.5) * (chk_l + chk_r);
 
     // ════════════════════════════════════════════════════════════════
-    // 2. NOSE — small line + nostril dots
+    // 2. NOSE — bridge shadow + tip + nostrils
     // ════════════════════════════════════════════════════════════════
-    vec2 nose_tip = vec2(0.0, 0.055);
-    float nose_d = sdCircle(uv, nose_tip, 0.009);
-    float nose_a = fill(nose_d, aa * 1.5) * 0.25 * face_m;
-    color = mix(color, u_skin_color * 0.72, nose_a);
+    // Nose bridge shadow — vertical line
+    float bridge_d = abs(uv.x) / 0.008;
+    float bridge_v = smoothstep(-0.010, 0.050, uv.y) * (1.0 - smoothstep(0.050, 0.065, uv.y));
+    float bridge_a = exp(-0.5 * bridge_d * bridge_d) * bridge_v * 0.12 * face_m;
+    color -= vec3(bridge_a);
+
+    // Nose tip — rounded shadow
+    vec2 nose_tip = vec2(0.0, 0.058);
+    float nose_d = sdCircle(uv, nose_tip, 0.010);
+    float nose_a = fill(nose_d, aa * 1.5) * 0.20 * face_m;
+    color = mix(color, u_skin_color * 0.74, nose_a);
+
+    // Nose side shadows — gives depth to the nose
+    float ns_l = exp(-0.5 * pow((uv.x + 0.012) / 0.006, 2.0)
+                     - 0.5 * pow((uv.y - 0.045) / 0.025, 2.0));
+    float ns_r = exp(-0.5 * pow((uv.x - 0.012) / 0.006, 2.0)
+                     - 0.5 * pow((uv.y - 0.045) / 0.025, 2.0));
+    color -= face_m * 0.030 * (ns_l + ns_r);
 
     // Nostrils — spread by nose_flare
     float n_spread = 0.014 + u_nose_flare * 0.008;
-    float nl = sdCircle(uv, nose_tip + vec2(-n_spread, 0.006), 0.005);
-    float nr = sdCircle(uv, nose_tip + vec2( n_spread, 0.006), 0.005);
-    float nostril_a = fill(min(nl, nr), aa) * 0.30 * face_m;
-    color = mix(color, u_skin_color * 0.58, nostril_a);
+    float nl = sdCircle(uv, nose_tip + vec2(-n_spread, 0.006), 0.0048);
+    float nr = sdCircle(uv, nose_tip + vec2( n_spread, 0.006), 0.0048);
+    float nostril_a = fill(min(nl, nr), aa) * 0.35 * face_m;
+    color = mix(color, u_skin_color * 0.52, nostril_a);
 
     // ════════════════════════════════════════════════════════════════
     // 3. BLUSH — cheek_raise drives pink circles
     // ════════════════════════════════════════════════════════════════
-    float bl_d = sdCircle(uv, vec2(-0.105, 0.06), 0.042);
-    float br_d = sdCircle(uv, vec2( 0.105, 0.06), 0.042);
+    float bl_d = sdCircle(uv, vec2(-0.100, 0.055), 0.040);
+    float br_d = sdCircle(uv, vec2( 0.100, 0.055), 0.040);
     float blush_a = u_cheek_raise * 0.38 * fill(min(bl_d, br_d), 0.025) * face_m;
     color = mix(color, u_blush_color, blush_a);
 
     // ════════════════════════════════════════════════════════════════
     // 4. MOUTH — parabolic lip arcs + teeth
     // ════════════════════════════════════════════════════════════════
-    vec2 mouth_c = vec2(0.0, 0.115);
-    float mw = 0.068;   // half-width of mouth
+    vec2 mouth_c = vec2(0.0, 0.118);
+    float mw = 0.065;   // half-width of mouth
     float total_part = u_lip_part * 0.028 + max(0.0, -u_jaw_tension) * 0.014;
 
     // Upper and lower lip Y positions
     float upper_y = mouth_c.y - total_part * 0.5;
     float lower_y = mouth_c.y + total_part * 0.5;
-    float curve_k = u_lip_curve * 0.028;
+    float curve_k = u_lip_curve * 0.026;
 
     // Draw lips as parabolic arcs
     float x_norm = clamp(uv.x / mw, -1.0, 1.0);
-    float in_mouth = 1.0 - smoothstep(mw * 0.92, mw, abs(uv.x));
+    float in_mouth = 1.0 - smoothstep(mw * 0.90, mw, abs(uv.x));
 
-    // Upper lip arc
-    float upper_target = upper_y - curve_k * x_norm * x_norm;
-    float ud = abs(uv.y - upper_target) - 0.0055;
+    // Upper lip arc — cupid's bow (dip at center)
+    float cupid = 0.002 * (1.0 - x_norm * x_norm * 4.0) * smoothstep(0.3, 0.0, abs(x_norm));
+    float upper_target = upper_y - curve_k * x_norm * x_norm + cupid;
+    float ud = abs(uv.y - upper_target) - 0.006;
     float upper_a = fill(ud, aa) * in_mouth * face_m;
     color = mix(color, u_lip_color, upper_a);
 
-    // Lower lip arc (slightly thicker)
-    float lower_target = lower_y - curve_k * x_norm * x_norm * 0.55;
-    float ld = abs(uv.y - lower_target) - 0.0072;
+    // Lower lip arc (slightly fuller)
+    float lower_target = lower_y - curve_k * x_norm * x_norm * 0.50;
+    float ld = abs(uv.y - lower_target) - 0.008;
     float lower_a = fill(ld, aa) * in_mouth * face_m;
-    color = mix(color, u_lip_color, lower_a);
+    color = mix(color, u_lip_color * 0.95, lower_a);
+
+    // Lip line — dark thin line between lips when closed
+    if (total_part < 0.012) {
+        float lip_line = abs(uv.y - mouth_c.y + curve_k * x_norm * x_norm);
+        float ll_a = fill(lip_line - 0.001, aa * 0.6) * in_mouth * face_m * 0.35;
+        color = mix(color, u_lip_color * 0.5, ll_a);
+    }
 
     // Teeth (visible when mouth open)
     if (total_part > 0.006) {
         float teeth_d = sdRoundedRect(uv, mouth_c,
-            vec2(mw * 0.55, total_part * 0.30), 0.004);
+            vec2(mw * 0.52, total_part * 0.28), 0.003);
         float teeth_a = fill(teeth_d, aa) * face_m
                        * smoothstep(0.005, 0.016, total_part);
         color = mix(color, u_teeth_color, teeth_a);
@@ -184,15 +234,15 @@ void main() {
     // ════════════════════════════════════════════════════════════════
     for (int side = -1; side <= 1; side += 2) {
         float sx = float(side);
-        vec2 eye_c = vec2(sx * 0.068, -0.042);
-        vec2 eye_r = vec2(0.034, 0.022);
+        vec2 eye_c = vec2(sx * 0.068, -0.040);
+        vec2 eye_r = vec2(0.036, 0.023);   // slightly larger
 
         // Eyelid clipping — eye_openness controls visible band
         float eo = u_eye_openness;
         float lid_top = eye_c.y - eye_r.y * (eo * 1.5 - 0.7);
         float lid_bot = eye_c.y + eye_r.y * (eo * 1.2 - 0.15);
-        // Cheek raise pushes lower lid up
-        lid_bot -= u_cheek_raise * 0.007;
+        // Cheek raise pushes lower lid up (squint)
+        lid_bot -= u_cheek_raise * 0.008;
 
         float lid_vis = step(lid_top, uv.y) * step(uv.y, lid_bot);
 
@@ -204,31 +254,42 @@ void main() {
         // Iris (shifted by gaze_direction)
         float gaze_x = u_gaze_direction * 0.013;
         vec2 iris_c = eye_c + vec2(gaze_x, 0.001);
-        float iris_d = sdCircle(uv, iris_c, 0.012);
+        float iris_d = sdCircle(uv, iris_c, 0.013);
         float iris_a = fill(iris_d, aa) * sclera_a;
         color = mix(color, u_iris_color, iris_a);
 
+        // Iris ring (lighter outer edge for realism)
+        float ring_d = abs(length(uv - iris_c) - 0.012);
+        float ring_a = fill(ring_d - 0.001, aa) * sclera_a * 0.25;
+        color = mix(color, u_iris_color * 1.4, ring_a);
+
         // Pupil
-        float pupil_d = sdCircle(uv, iris_c, 0.005);
+        float pupil_d = sdCircle(uv, iris_c, 0.006);
         float pupil_a = fill(pupil_d, aa) * iris_a;
         color = mix(color, u_pupil_color, pupil_a);
 
-        // Specular highlight (opposite gaze side + above)
-        vec2 hi_c = iris_c + vec2(-gaze_x * 0.35 - sx * 0.004, -0.005);
-        float hi_d = sdCircle(uv, hi_c, 0.0035);
+        // Specular highlight (top-left of iris, opposite gaze)
+        vec2 hi_c = iris_c + vec2(-gaze_x * 0.35 - sx * 0.003, -0.005);
+        float hi_d = sdCircle(uv, hi_c, 0.004);
         float hi_a = fill(hi_d, aa) * sclera_a;
         color = mix(color, u_highlight_color, hi_a);
 
-        // Upper eyelid line
+        // Secondary small highlight
+        vec2 hi2_c = iris_c + vec2(sx * 0.005, 0.004);
+        float hi2_d = sdCircle(uv, hi2_c, 0.0018);
+        float hi2_a = fill(hi2_d, aa) * sclera_a * 0.7;
+        color = mix(color, u_highlight_color, hi2_a);
+
+        // Upper eyelid line (lash line — darker, thicker)
         float lid_line_d = abs(uv.y - lid_top);
-        float lid_in_x = fill(sdEllipse(uv, eye_c, eye_r * 1.15), aa);
-        float lid_a = fill(lid_line_d - 0.001, aa * 0.8) * lid_in_x * face_m * 0.45;
-        color = mix(color, u_skin_color * 0.55, lid_a);
+        float lid_in_x = fill(sdEllipse(uv, eye_c, eye_r * 1.12), aa);
+        float lid_a = fill(lid_line_d - 0.0014, aa * 0.7) * lid_in_x * face_m * 0.55;
+        color = mix(color, u_brow_color * 0.6, lid_a);
 
         // Lower eyelid subtle line
         float lid_bot_d = abs(uv.y - lid_bot);
-        float lid_bot_a = fill(lid_bot_d - 0.0008, aa * 0.8) * lid_in_x * face_m * 0.20;
-        color = mix(color, u_skin_color * 0.65, lid_bot_a);
+        float lid_bot_a = fill(lid_bot_d - 0.0008, aa * 0.8) * lid_in_x * face_m * 0.18;
+        color = mix(color, u_skin_color * 0.62, lid_bot_a);
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -236,21 +297,21 @@ void main() {
     // ════════════════════════════════════════════════════════════════
     for (int side = -1; side <= 1; side += 2) {
         float sx = float(side);
-        float by_base = -0.090;
+        float by_base = -0.088;
         float by_off  = u_eyebrow_angle * 0.028;
         float scrunch = u_brow_scrunch * 0.016 * sx;
 
         // Brow as tapered line segment
-        vec2 inner = vec2(sx * 0.028 - scrunch,
+        vec2 inner = vec2(sx * 0.030 - scrunch,
                           by_base + by_off + u_eyebrow_angle * 0.012);
-        vec2 outer = vec2(sx * 0.098,
+        vec2 outer = vec2(sx * 0.100,
                           by_base + by_off - u_eyebrow_angle * 0.006);
 
         // Taper: thicker at inner, thinner at outer
         float along = dot(uv - inner, outer - inner)
                      / dot(outer - inner, outer - inner);
         along = clamp(along, 0.0, 1.0);
-        float thickness = mix(0.0062, 0.0028, along);
+        float thickness = mix(0.0065, 0.0025, along);
 
         float brow_d = sdSegment(uv, inner, outer) - thickness;
         float brow_a = fill(brow_d, aa) * face_m;
@@ -258,9 +319,9 @@ void main() {
     }
 
     // ════════════════════════════════════════════════════════════════
-    // 7. FACE EDGE — soft shadow at face boundary for depth
+    // 7. FACE EDGE — soft shadow at boundary for depth
     // ════════════════════════════════════════════════════════════════
-    float edge_shadow = smoothstep(-0.020, 0.0, face_d) * 0.12 * face_m;
+    float edge_shadow = smoothstep(-0.022, 0.0, face_d) * 0.10 * face_m;
     color -= vec3(edge_shadow);
 
     out_color = vec4(clamp(color, 0.0, 1.0), 1.0);
