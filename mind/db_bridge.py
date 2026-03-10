@@ -1,5 +1,5 @@
 """
-mind/db_bridge.py — SpaceDB <-> RAEON Expression Bridge
+mind/db_bridge.py -- SpaceDB <-> RAEON Expression Bridge
 
 This is where the magic happens.
 
@@ -7,14 +7,17 @@ Every expression RAEON shows gets stored as a MemoryBlock in SpaceDB.
 Expression blocks get reinforced alongside the input blocks that triggered them.
 Over time, W matrix learns: certain inputs -> certain expressions.
 Expression clusters emerge -> expression personalities form.
-RAEON starts expressing emotions automatically from memory — not rules.
+RAEON starts expressing emotions automatically from memory -- not rules.
+
+Compatible with SpaceDB v0.2.0+ (chainable query API).
 """
 
-import time
-import numpy as np
+import logging
 from typing import Optional
 
 from face.expression import ExpressionVector
+
+log = logging.getLogger("raeon.bridge")
 
 
 class ExpressionBridge:
@@ -32,14 +35,17 @@ class ExpressionBridge:
 
     SENSORY_TYPE = "expression"
 
-    def __init__(self, db):
+    def __init__(self, space):
         """
-        db : SpaceDB instance (from theSpaceDB)
+        Parameters
+        ----------
+        space : spacedb.Space
+            An open Space instance from SpaceClient.
         """
-        self.db = db
+        self.space = space
         self._last_input_block_id: Optional[str] = None
 
-    # ── core: input -> expression ─────────────────────────────────────
+    # -- core: input -> expression ----------------------------------------
 
     def process_input(self, text: str,
                       fallback_preset: str = "neutral") -> ExpressionVector:
@@ -54,41 +60,36 @@ class ExpressionBridge:
         """
 
         # Ingest language block
-        lang_block = self.db.ingest(text, sensory_type="text")
+        lang_block = self.space.ingest(text, sensory_type="text")
         self._last_input_block_id = lang_block.id
 
-        # Query SpaceDB for related expression memories
-        expr_results = self.db.query(
-            self.db._space._embed(text),  # reuse embedding
-            time_budget_ms=200,
-            limit=5,
-        )
+        # Query SpaceDB for related expression memories (v0.2.0 chainable API)
+        expr_results = self.space.query(text).within(ms=200).limit(5).fetch()
 
         # Filter for expression-type blocks only
         expr_hits = [
-            (block, score)
-            for block, score in expr_results
-            if block.sensory_type == self.SENSORY_TYPE
+            r for r in expr_results
+            if r["sensory_type"] == self.SENSORY_TYPE
         ]
 
         if expr_hits:
             # RAEON remembers how it felt about something like this
-            best_block, score = expr_hits[0]
-            ev = self._decode_expression(best_block.token)
-            print(f"[Bridge] Memory recall: '{best_block.token[:40]}'  "
-                  f"score={score:.3f}")
+            best = expr_hits[0]
+            ev = self._decode_expression(best["token"])
+            log.info("Memory recall: '%s'  score=%.3f",
+                     best["token"][:40], best["score"])
         else:
             # No memory yet -> use keyword heuristic for bootstrapping
             ev = self._heuristic_expression(text, fallback_preset)
-            print(f"[Bridge] Heuristic expression: {ev.to_dict()}")
+            log.info("Heuristic expression: %s", ev.to_dict())
 
         # Store this expression as a new memory block
-        expr_token  = self._encode_expression(ev)
-        expr_block  = self.db.ingest(expr_token, sensory_type=self.SENSORY_TYPE)
+        expr_token = self._encode_expression(ev)
+        expr_block = self.space.ingest(expr_token, sensory_type=self.SENSORY_TYPE)
 
         # Reinforce: language block <-> expression block
         # W matrix learns their connection
-        self.db.reinforce(lang_block.id, expr_block.id, strength=0.015)
+        self.space.reinforce(lang_block.id, expr_block.id, strength=0.015)
 
         return ev
 
@@ -99,15 +100,15 @@ class ExpressionBridge:
         Reinforce with last input block if available.
         """
         expr_token = self._encode_expression(ev)
-        expr_block = self.db.ingest(expr_token, sensory_type=self.SENSORY_TYPE)
+        expr_block = self.space.ingest(expr_token, sensory_type=self.SENSORY_TYPE)
 
         link_id = trigger_block_id or self._last_input_block_id
         if link_id:
-            self.db.reinforce(link_id, expr_block.id, strength=0.015)
+            self.space.reinforce(link_id, expr_block.id, strength=0.015)
 
         return expr_block
 
-    # ── expression encoding ───────────────────────────────────────────
+    # -- expression encoding -----------------------------------------------
 
     def _encode_expression(self, ev: ExpressionVector) -> str:
         """
@@ -127,16 +128,16 @@ class ExpressionBridge:
         body = token[6:]
         d = {}
         key_map = {
-            "eye_": "eye_openness",
-            "eyeb": "eyebrow_angle",
-            "brow": "brow_scrunch",
-            "lip_": "lip_curve",
-            "lip_": "lip_part",
-            "jaw_": "jaw_tension",
-            "nose": "nose_flare",
-            "chee": "cheek_raise",
-            "head": "head_tilt",
-            "gaze": "gaze_direction",
+            "eye_o": "eye_openness",
+            "eyeb":  "eyebrow_angle",
+            "brow":  "brow_scrunch",
+            "lip_c": "lip_curve",
+            "lip_p": "lip_part",
+            "jaw_":  "jaw_tension",
+            "nose":  "nose_flare",
+            "chee":  "cheek_raise",
+            "head":  "head_tilt",
+            "gaze":  "gaze_direction",
         }
         for part in body.split(","):
             if "=" in part:
@@ -181,17 +182,15 @@ class ExpressionBridge:
                 "lip_curve": 0.05
             })
 
-    # ── introspection ────────────────────────────────────────────────
+    # -- introspection ------------------------------------------------------
 
     def expression_clusters(self) -> list:
         """Return expression-related clusters from SpaceDB."""
         return [
-            c for c in self.db.clusters.all()
-            if c.get("name", "").startswith("expr") or
-               any("expr" in (self.db._engine._blocks.read(bid) or
-                   type("B", (), {"sensory_type": ""})()).sensory_type
-                   for bid in [])
+            c for c in self.space.clusters.all()
+            if (c.get("name") or "").startswith("expr")
         ]
 
     def memory_count(self) -> int:
-        return self.db.blocks.count()
+        """Total memory blocks in the space."""
+        return self.space.status()["blocks"]
