@@ -63,8 +63,14 @@ class ExpressionBridge:
         lang_block = self.space.ingest(text, sensory_type="text")
         self._last_input_block_id = lang_block.id
 
+        # Personality switching: pick the personality closest to input context
+        pid = self._pick_personality(text)
+
         # Query SpaceDB for related expression memories (v0.2.0 chainable API)
-        expr_results = self.space.query(text).within(ms=200).limit(5).fetch()
+        q = self.space.query(text).within(ms=200).limit(5)
+        if pid:
+            q = q.as_personality(pid)
+        expr_results = q.fetch()
 
         # Filter for expression-type blocks only
         expr_hits = [
@@ -181,6 +187,35 @@ class ExpressionBridge:
                 "eye_openness": 0.6, "eyebrow_angle": 0.0,
                 "lip_curve": 0.05
             })
+
+    # -- personality switching ------------------------------------------------
+
+    def _pick_personality(self, text: str) -> Optional[str]:
+        """
+        Choose which personality to invoke based on input context.
+        Quick query per personality — pick the one with highest avg score.
+        Returns personality cluster_id, or None if no personalities exist.
+        """
+        personalities = self.space.clusters.personalities()
+        if not personalities:
+            return None
+        best_pid, best_score = None, -1.0
+        for p in personalities:
+            results = (
+                self.space.query(text)
+                    .as_personality(p["id"])
+                    .within(ms=50)
+                    .limit(3)
+                    .fetch()
+            )
+            if results:
+                avg = sum(r["score"] for r in results) / len(results)
+                if avg > best_score:
+                    best_score = avg
+                    best_pid = p["id"]
+        if best_pid:
+            log.info("Personality switch -> %s (score=%.3f)", best_pid, best_score)
+        return best_pid
 
     # -- introspection ------------------------------------------------------
 
